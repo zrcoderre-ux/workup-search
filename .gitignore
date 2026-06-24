@@ -1,0 +1,18 @@
+# Machine-specific paths — copy config.example.py to config.py and edit
+config.py
+
+# Local SQLite index (also lives in %LOCALAPPDATA%, never in the repo)
+workups_index.db
+*.db
+*.db-wal
+*.db-shm
+
+# Runtime log
+workup_debug.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Legacy citation cache (removed from the project; ignore any stray copy)
+citation_repo.json
