@@ -1,28 +1,27 @@
 """
-config.example.py — machine-specific paths for Workup Search.
+config.example.py — default paths for Workup Search (committed template).
 
-SETUP: copy this file to `config.py` (which is gitignored) and edit the
-values below for this machine. The repo itself never contains real paths,
-so the working tree stays clean and relocatable.
+On a fresh clone there is no `config.py` (it is gitignored). The app creates
+`config.py` from this file automatically on first run, so a clone is runnable
+with no manual steps. `config.py` is the per-machine override: once it exists,
+pulls never touch it, so you can change paths on one machine without affecting
+the repo or other machines.
 
-    copy config.example.py config.py      (Windows: copy / PowerShell: cp)
-
-Nothing else needs editing to move the project folder — the launcher and
-the Python scripts resolve their own location automatically.
+To change the defaults for every new clone, edit this file and commit it.
 """
 
 import os
 
 # ── Folder of motion "workup" .docx files (indexed corpus) ──────────────────
-# This is your live document set on the SharePoint-synced library. Point it at
-# wherever the Workups folder actually lives on this machine.
-WORKUPS_FOLDER = r"C:\Users\<USERNAME>\Los Angeles Superior Court\Research Attorney and Law Clerk Unit - <USERNAME>\Workups"
+# Live document set on the SharePoint-synced library.
+WORKUPS_FOLDER = r"C:\Users\ZCoderre\Los Angeles Superior Court\Research Attorney and Law Clerk Unit - Zachary Coderre\Workups"
 
 # ── SQLite FTS5 index database ──────────────────────────────────────────────
-# MUST live on a NON cloud-synced path. SharePoint/OneDrive sync corrupts
+# MUST stay off any cloud-synced path. SharePoint/OneDrive sync corrupts
 # SQLite's atomic writes mid-transaction. %LOCALAPPDATA% is local-only and
-# username-independent, so this default works for any account without editing.
+# username-independent, so this works on any account without editing.
 DATABASE_FILE = os.path.join(
     os.environ.get("LOCALAPPDATA", os.path.expanduser(r"~\AppData\Local")),
     "WorkupSearch", "workups_index.db",
 )
+

@@ -10,10 +10,17 @@ import hashlib
 import xml.etree.ElementTree as ET
 from datetime import datetime
 
+# First run after a fresh clone has no config.py — create it from the template.
+import shutil
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if not os.path.isfile(os.path.join(_HERE, "config.py")):
+    _example = os.path.join(_HERE, "config.example.py")
+    if os.path.isfile(_example):
+        shutil.copyfile(_example, os.path.join(_HERE, "config.py"))
 try:
     from config import WORKUPS_FOLDER, DATABASE_FILE
 except ImportError:
-    sys.exit("Missing config.py — copy config.example.py to config.py and set your paths.")
+    sys.exit("Missing config.py and config.example.py — restore them from the repo.")
 
 WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
