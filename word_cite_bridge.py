@@ -26,8 +26,9 @@ OUTPUT (UTF-8, one record per line, tab-separated)
   start, end  : character offsets into the block's normalized plain text
                 (end exclusive, Python slice semantics)
   type        : "case" | "statute" | "rule"
-  url         : resolved URL (repo URL if a repo entry matched, else the
-                auto-built fallback: Google Scholar / leginfo / courts.ca.gov)
+  url         : live Lexis+ search URL built from the citation's Lexis search
+                term (see lexis_url_for). Citations with no Lexis anchor
+                (e.g. WL-only unpublished cases) produce no row.
   match_text  : the literal matched text (tabs/newlines flattened to spaces);
                 used for the macro's Find fallback and for the link ScreenTip
 
@@ -40,9 +41,48 @@ import os
 import re
 import sys
 import json
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import citation_extractor as ce  # noqa: E402
+
+
+# ── LIVE LEXIS+ SEARCH URL ─────────────────────────────────────────────────────
+# Every emitted row carries a live Lexis+ search URL instead of the citation's
+# stored/fallback URL (Google Scholar / leginfo / courts.ca.gov). citation_
+# extractor already computes the correct Lexis pdsearchterms value for each
+# citation in its `lexis_search_term` field — a disambiguated "name + reporter
+# cite" for cases, the Lexis-native code name for statutes (e.g. "Cal Code Civ
+# Proc § 760.020"), the case name for slip cites, and the rule key for rules —
+# so we only need to copy the thin URL wrapper.
+#
+# `_lexis_search_url` is a Python port of `lexisSearchUrl` from the pdf-viewer
+# repo (zrcoderre-ux/pdf-viewer, viewer/code-tables.js), which is the canonical
+# source for the Lexis+ search URL format. Keep it in sync with that file. The
+# `safe` set mirrors JavaScript's encodeURIComponent (which leaves !*'() and the
+# always-unreserved -_.~ unescaped) so the query string matches byte-for-byte.
+_LEXIS_PDMFID = "1530671"
+
+
+def _lexis_search_url(term):
+    """Live Lexis+ search URL for a search term (port of lexisSearchUrl in
+    pdf-viewer/viewer/code-tables.js)."""
+    return (
+        "https://plus.lexis.com/search/"
+        "?pdmfid=" + _LEXIS_PDMFID +
+        "&pdsearchterms=" + quote(term, safe="!*'()")
+    )
+
+
+def lexis_url_for(c):
+    """Live Lexis+ search URL for a citation, from the extractor-provided Lexis
+    search term. Returns "" when no term can be built (e.g. WL-only cases, which
+    have no Lexis anchor), so the caller's `if not url: continue` guard skips
+    them rather than linking to an empty search."""
+    term = c.lexis_search_term
+    if not term:
+        return ""
+    return _lexis_search_url(term)
 
 # Chained continuations ("§§ 1542, 1543, and 1544" / "rules 3.1350, 3.1354")
 # arrive with their leading separator included in the span. Strip it so the
@@ -103,7 +143,7 @@ def extract_rows(doc_html, repo=None):
         for c in cites:
             if c.match_start is None or c.match_end is None:
                 continue
-            url = c.url or c.fallback_url or ""
+            url = lexis_url_for(c)
             if not url:
                 continue
             start = _trim_leading_separator(plain, c.match_start, c.match_end)
@@ -152,7 +192,7 @@ def extract_rows(doc_html, repo=None):
             target = by_short.get(ce._short_name(m.group(1)))
             if target is None:
                 continue
-            url = target.url or target.fallback_url or ""
+            url = lexis_url_for(target)
             if not url:
                 continue
             rows.append("\t".join([
@@ -178,7 +218,7 @@ def extract_rows(doc_html, repo=None):
                         break
             if target is None:
                 continue
-            url = target.url or target.fallback_url or ""
+            url = lexis_url_for(target)
             if not url:
                 continue
             # Strip the leading signal word ("But", "See", ...) from the link
