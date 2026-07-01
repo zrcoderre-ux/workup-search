@@ -717,25 +717,11 @@ def _walk_back_for_name(text, v_pos):
     return start
 
 
-def _disambig_head(name_part):
-    """The leading token(s) used to disambiguate a Lexis search for a case:
-    'In re Subject', 'X Y Cases', or just the first plaintiff word."""
-    name_part = name_part.strip().rstrip(",")
-    nonv = re.match(rf"^({_NONV_PREFIX})\s+(\S+)", name_part, re.IGNORECASE)
-    if nonv:
-        return f"{nonv.group(1)} {nonv.group(2)}"
-    cases_m = re.match(r"^((?:[A-Z]\S*\s+){1,4}Cases)\b", name_part)
-    if cases_m:
-        return cases_m.group(1)
-    parts = name_part.split()
-    return parts[0].rstrip(".,;:") if parts else ""
-
-
 # ── CASE CITATION EXTRACTION ────────────────────────────────────────────────────
 
 def _make_case(key, case_name, year, volume, reporter, first_page,
                span, match_text, *, wl_only=False, lexis_only=False,
-               slip_only=False, disambig_head="", short_name=""):
+               slip_only=False, short_name=""):
     """Construct a case Citation with resolution data populated."""
     if wl_only or lexis_only or slip_only:
         fallback = build_google_scholar_name_url(case_name or key)
@@ -754,8 +740,12 @@ def _make_case(key, case_name, year, volume, reporter, first_page,
         lexis_term = key  # "2024 U.S. Dist. LEXIS 12345"
         wl_cite = None
     else:
-        head = disambig_head or _short_name(case_name or "")
-        lexis_term = f"{head} {key}".strip() if head else key
+        # Full case name (BOTH parties) + reporter cite, matching pdf-viewer's
+        # disambiguatedLexisTerm. Including both party names — not just the
+        # first plaintiff word — keeps a same-volume neighbour from winning the
+        # Lexis search (e.g. "Miranda v. Arizona 384 U.S. 436" vs a different
+        # case reported at 384 U.S. 333).
+        lexis_term = f"{case_name} {key}".strip() if case_name else key
         wl_cite = key  # bare reporter cite — required by findType=Y
 
     short_names = []
@@ -815,7 +805,6 @@ def _extract_cases(plain):
         case_name = f"{plaintiff_clean} v. {defendant_clean}"
         full_span = (plaintiff_start, v_end + mm.end())
         match_text = plain[full_span[0]:full_span[1]]
-        head = _disambig_head(plaintiff_clean) or _short_name(plaintiff_clean)
         sname = _short_name(plaintiff_clean)
 
         if kind in ("csm",):
@@ -823,15 +812,13 @@ def _extract_cases(plain):
             key = f"{vol} {_normalize_reporter(rep)} {page}"
             results.append(_make_case(key, case_name, year, vol,
                                       _normalize_reporter(rep), page,
-                                      full_span, match_text,
-                                      disambig_head=head, short_name=sname))
+                                      full_span, match_text, short_name=sname))
         elif kind in ("bb", "flat"):
             vol, rep, page, year = mm.group(1), mm.group(2), mm.group(3), mm.group(4)
             key = f"{vol} {_normalize_reporter(rep)} {page}"
             results.append(_make_case(key, case_name, year, vol,
                                       _normalize_reporter(rep), page,
-                                      full_span, match_text,
-                                      disambig_head=head, short_name=sname))
+                                      full_span, match_text, short_name=sname))
         elif kind == "wl":
             wl_year, wl_num = mm.group(1), mm.group(2)
             key = f"{wl_year} WL {wl_num}"
@@ -873,7 +860,6 @@ def _extract_cases(plain):
         results.append(_make_case(
             key, full_name, year, vol, _normalize_reporter(rep), page,
             m.span(), m.group(0),
-            disambig_head=_disambig_head(full_name),
             short_name=_short_name(full_name),
         ))
 
@@ -888,7 +874,7 @@ def _extract_cases(plain):
         results.append(_make_case(
             key, name, year, vol, _normalize_reporter(rep), page,
             m.span(), m.group(0),
-            disambig_head=name, short_name=name.split()[0] if name.split() else name,
+            short_name=name.split()[0] if name.split() else name,
         ))
 
     return results
