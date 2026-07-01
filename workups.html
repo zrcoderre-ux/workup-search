@@ -1415,14 +1415,21 @@ function lexisSearchUrl(c) {
   return 'https://plus.lexis.com/search/?pdmfid=1530671&pdsearchterms=' + encodeURIComponent(term);
 }
 function westlawSearchUrl(c) {
+  // Port of pdf-viewer resolveUrl's Westlaw branch (westlawCaseUrl /
+  // westlawStatuteUrl / westlawRuleUrl). Cases use the direct findType=Y link
+  // off the bare reporter cite; WL database numbers aren't served by
+  // findType=Y, so those route through search instead.
   if (c.type === 'case') {
-    // Bare reporter cite (or WL/LEXIS number) drives findType=Y; WL/LEXIS
-    // database numbers aren't served by findType=Y, so search those instead.
     var cite = c.westlaw_search_cite || c.key;
-    if (/\bWL\b|LEXIS/.test(cite)) {
+    if (/ WL /.test(cite)) {
       return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(cite) + '&jurisdiction=CA&contentType=CASE';
     }
     return 'https://1.next.westlaw.com/Link/Document/FullText?findType=Y&cite=' + encodeURIComponent(cite);
+  }
+  if (c.type === 'rule') {
+    // Court rules aren't indexed as statutes — no contentType filter.
+    var rterm = c.westlaw_search_cite || c.key;
+    return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(rterm) + '&jurisdiction=CA';
   }
   var term = c.westlaw_search_cite || buildWLTerm(c.key);
   return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(term) + '&jurisdiction=CA&contentType=STATUTE';
