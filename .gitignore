@@ -1,7 +1,7 @@
 # Machine-specific paths — copy config.example.py to config.py and edit
 config.py
 
-# Local SQLite index (also lives in %LOCALAPPDATA%, never in the repo)
+# Local SQLite index (lives in %USERPROFILE%\WorkupSearch, never in the repo)
 workups_index.db
 *.db
 *.db-wal

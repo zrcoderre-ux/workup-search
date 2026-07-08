@@ -30,8 +30,8 @@ With the auto-pull tool, setup is hands-off: add the repo to `pull-extensions.ps
   run of `index.py` or `app.py` (it is gitignored and never pushed; it is the
   per-machine override).
 - Build the document index once with `python index.py`. This writes the
-  database to `%LOCALAPPDATA%\WorkupSearch\`. Re-run it whenever you add or
-  change workup documents.
+  database to `%USERPROFILE%\WorkupSearch\` (i.e. `C:\Users\<you>\WorkupSearch\`).
+  Re-run it whenever you add or change workup documents.
 
 So after the clone: run `python index.py` once, then launch via the desktop
 shortcut (or `Workup Search.vbs` / `Workup Search.bat` directly). The desktop
@@ -55,9 +55,16 @@ yet anyway — `config.py` is created on the first local run after cloning.
 - **This repo folder is relocatable** — put it anywhere *except* inside a
   cloud-synced folder (OneDrive/SharePoint). Git and cloud sync corrupt each
   other's working files. `C:\Users\<you>\Apps\Workup Search` is a good spot.
-- **The index database is never in the repo.** It lives in `%LOCALAPPDATA%`
-  because SharePoint/OneDrive sync corrupts SQLite mid-write. A fresh clone
-  rebuilds it on the first `python index.py` run.
+- **The index database is never in the repo.** It lives in `%USERPROFILE%\WorkupSearch\`
+  (a plain folder in your user directory). It is kept off any synced path
+  because SharePoint/OneDrive sync corrupts SQLite mid-write, **and** out of
+  `%LOCALAPPDATA%` because the Microsoft Store build of Python silently
+  redirects `AppData\Local` writes into a hidden per-package sandbox — which
+  makes the DB unfindable at the printed path and orphans it on a Python
+  version bump. The user-profile root avoids both traps. A fresh clone rebuilds
+  the DB on the first `python index.py` run (note: user-created tags live only
+  in this DB and are *not* rebuilt from the `.docx` files, so preserve it when
+  moving machines or upgrading Python).
 - **The Workups `.docx` corpus** stays on its SharePoint library path; the
   code only needs the path to it (set in `config.py`).
 
