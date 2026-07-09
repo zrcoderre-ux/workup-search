@@ -51,6 +51,7 @@ FUTURE MACRO INTEGRATION
 
 import re
 import html
+from collections import namedtuple
 from urllib.parse import quote_plus
 
 
@@ -432,6 +433,10 @@ class Citation:
       westlaw_search_cite: str | None — bare reporter cite for findType=Y
                                         (or WL/LEXIS number, or case-name search)
       short_name      : str  — distinguishing token for supra resolution
+                               (the author's override, when one was given)
+      short_name_override : str — the author's own short name, taken from a
+                               trailing "(Grand Terrace)" parenthetical; ""
+                               when the document didn't supply one
       short_names     : list — alias strings (case-name cores / supra / short
                                forms) the client may also link to this URL
     """
@@ -444,7 +449,7 @@ class Citation:
         # ── new ──
         "wl_only", "lexis_only", "slip_only", "provider_lock",
         "lexis_search_term", "westlaw_search_cite",
-        "short_name", "short_names",
+        "short_name", "short_name_override", "short_names",
     ]
 
     def __init__(self, **kwargs):
@@ -452,6 +457,8 @@ class Citation:
             setattr(self, slot, kwargs.get(slot))
         if self.short_names is None:
             self.short_names = []
+        if self.short_name_override is None:
+            self.short_name_override = ""
 
     def to_dict(self):
         return {s: getattr(self, s) for s in self.__slots__}
@@ -526,10 +533,65 @@ INRE_RE = re.compile(
     rf")"
 )
 
-SUPRA_RE = re.compile(
-    rf"\b((?:(?:{_NONV_PREFIX})\s+)?[A-Z][A-Za-z0-9.\-'&]+(?:\s+v\.\s+[A-Z][A-Za-z0-9.\-'&]+)?)"
-    r",\s*supra\b"
+# A supra reference's name may be a single party surname ("Aguilar"), an
+# authorial short name of several title-case words ("Grand Terrace"), a
+# non-v. caption ("In re Marriage of Bonds"), or a full "X v. Y" core.
+# It may be followed by the volume/reporter of the earlier full cite
+# ("Aguilar, supra, 25 Cal.4th at p. 850"), which is the second-priority
+# resolution key when the name itself doesn't match anything.
+_SUPRA_TOKEN = r"[A-Z][A-Za-z0-9.\-'&]*"
+# Lowercase connectors bind two title-case tokens ("City of Grand Terrace",
+# "In re Marriage of Bonds"). Without them the run stops at the connector and
+# the "Marriage of" alternative in _NONV_PREFIX swallows the caption's head.
+_SUPRA_CONNECTOR = r"(?:of|the|and|&|de|la|du|von|van)"
+_SUPRA_RUN = rf"{_SUPRA_TOKEN}(?:\s+(?:{_SUPRA_CONNECTOR}\s+)?{_SUPRA_TOKEN}){{0,3}}"
+_SUPRA_NAME = (
+    rf"(?:(?:{_NONV_PREFIX})\s+)?{_SUPRA_RUN}"
+    rf"(?:\s+v\.\s+{_SUPRA_RUN})?"
 )
+SUPRA_RE = re.compile(
+    rf"\b({_SUPRA_NAME})(,\s*supra)\b"
+    rf"(?:\s*,\s*(?:at\s+)?(\d{{1,4}})\s+({REPORTER_PATTERN}))?"
+)
+
+# Title-case words that can precede a supra name and get swept into the
+# multi-token run ("See Grand Terrace, supra"). "In" is stripped too, unless
+# it opens an "In re" caption.
+_SUPRA_LEAD_WORDS = {
+    "see", "cf", "but", "and", "the", "compare", "accord", "also", "in",
+    "per", "citing", "quoting", "following", "like", "under", "of", "to",
+    "by", "from", "as", "here", "thus", "e.g", "id",
+}
+_SUPRA_LEAD_TOKEN_RE = re.compile(r"^([A-Za-z.'&\-]+)\s+(?=\S)")
+_SUPRA_INRE_RE = re.compile(rf"^(?:{_NONV_PREFIX})\b")
+
+SupraRef = namedtuple("SupraRef", "name start end volume reporter")
+
+
+def iter_supra(plain):
+    """Yield SupraRef for each 'X, supra' reference in `plain`.
+
+    `start`/`end` bound the name only (not the ", supra" tail), matching what
+    the Word bridge needs to hyperlink. `volume`/`reporter` are the trailing
+    cite fragment when present, else None.
+    """
+    for m in SUPRA_RE.finditer(plain):
+        name = m.group(1)
+        start = m.start(1)
+        while True:
+            if _SUPRA_INRE_RE.match(name):
+                break
+            wm = _SUPRA_LEAD_TOKEN_RE.match(name)
+            if not wm:
+                break
+            word = wm.group(1).lower().rstrip(".")
+            if word not in _SUPRA_LEAD_WORDS:
+                break
+            start += wm.end()
+            name = name[wm.end():]
+        if not name:
+            continue
+        yield SupraRef(name, start, start + len(name), m.group(3), m.group(4))
 
 _TITLE_WORD = r"[A-Z][a-z][A-Za-z]*"
 _CASES_FIRST = r"(?!The\b|In\b|See\b|Cf\b|But\b)" + _TITLE_WORD
@@ -717,11 +779,124 @@ def _walk_back_for_name(text, v_pos):
     return start
 
 
+# ── SHORT-NAME OVERRIDE PARENTHETICAL (port of ShortCite's snO block) ──────────
+# A full cite may be followed by the author's own short name:
+#
+#   City of Grand Terrace v. Superior Court (1987) 192 Cal.App.3d 1251, 1261
+#   (Grand Terrace).
+#
+# That parenthetical, not the derived plaintiff surname, is what later supra
+# references use. The hard part is not finding "(...)" — it is refusing the
+# explanatory parentheticals that look identical to a naive matcher:
+#
+#   ... 25 Cal.4th 826, 843 (disapproved on other grounds in Reid v. Google).
+#
+# Guards (from ShortCite): the inner text must start with a letter, run no more
+# than _OVERRIDE_MAX_LEN characters, contain no paragraph break, and not be an
+# explanatory parenthetical. Ported additions: the first letter must be
+# uppercase, and structural giveaways (a year, a nested cite, a "v.", a
+# semicolon) disqualify it.
+
+_OVERRIDE_MAX_LEN = 60
+_OVERRIDE_MAX_WORDS = 6
+
+# First word of the parenthetical. Checked case-insensitively.
+_EXPLANATORY_FIRST_WORDS = {
+    "disapproved", "disapproving", "overruled", "overruling",
+    "abrogated", "abrogating", "superseded", "superseding",
+    "questioned", "criticized", "modified", "modifying", "affirmed",
+    "affirming", "reversed", "reversing", "vacated", "depublished",
+    "review", "cert", "rehearing", "reh'g", "rev'd", "aff'd",
+    "holding", "held", "finding", "noting", "concluding", "explaining",
+    "observing", "rejecting", "applying", "construing", "distinguishing",
+    "citing", "quoting", "internal", "emphasis", "italics", "cleaned",
+    "footnote", "footnotes", "fn", "fns", "accord", "see", "cf",
+    "compare", "but", "e.g", "i.e", "as", "per", "en", "dictum", "dicta",
+    "conc", "dis", "opn", "plurality", "collecting", "summarizing",
+}
+
+_EXPLANATORY_PHRASES = (
+    "other grounds", "another ground", "by statute", "on remand",
+    "emphasis added", "italics added", "emphasis in", "italics in",
+    "internal quotation", "cleaned up", "citations omitted",
+    "quotations omitted", "omitted", "review granted", "review den",
+    "cert. denied", "cert denied", "en banc", "per curiam", "as modified",
+    "disapproved", "overruled", "abrogated", "superseded", "depublished",
+)
+
+_OVERRIDE_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}\b")
+_OVERRIDE_CITE_RE = re.compile(rf"\d{{1,4}}\s+{REPORTER_PATTERN}")
+
+
+def _is_explanatory_parenthetical(inner):
+    """True when `inner` is a subsequent-history / explanatory parenthetical
+    rather than the author's short name for the case."""
+    text = inner.strip()
+    if not text:
+        return True
+
+    low = text.lower()
+    first = re.split(r"[\s,;:]+", low, maxsplit=1)[0].rstrip(".")
+    if first in _EXPLANATORY_FIRST_WORDS:
+        return True
+    if any(p in low for p in _EXPLANATORY_PHRASES):
+        return True
+
+    # Structural giveaways: a year, an embedded reporter cite, a case name,
+    # or a list separator all mean this is not a short name.
+    if _OVERRIDE_YEAR_RE.search(text):
+        return True
+    if _OVERRIDE_CITE_RE.search(text):
+        return True
+    if re.search(r"\bv\.\s", text):
+        return True
+    if ";" in text:
+        return True
+    return False
+
+
+def _is_valid_short_name_override(inner):
+    text = inner.strip()
+    if not text or len(text) > _OVERRIDE_MAX_LEN:
+        return False
+    if "\n" in text or "\r" in text:
+        return False
+    if not (text[0].isalpha() and text[0].isupper()):
+        return False
+    if text.endswith(","):
+        return False
+    if len(text.split()) > _OVERRIDE_MAX_WORDS:
+        return False
+    return not _is_explanatory_parenthetical(text)
+
+
+# Material the override may sit behind: a bracketed parallel cite
+# ("[251 Cal.Rptr.3d 269]") and/or a footnote pin (", fn. 3"), plus spacing.
+# Nothing else — a period or a closing paren means the sentence moved on.
+_PRE_OVERRIDE_RE = re.compile(
+    r"\s*(?:\[[^\]\n]{0,120}\]\s*)?"
+    r"(?:,\s*fns?\.\s*\d+\s*)?"
+    r"(?:\[[^\]\n]{0,120}\]\s*)?"
+)
+_OVERRIDE_RE = re.compile(rf"\(([^()\n]{{1,{_OVERRIDE_MAX_LEN}}})\)")
+
+
+def _short_name_override(plain, cite_end):
+    """Return the author's short name for the cite ending at `cite_end`, or ""."""
+    pre = _PRE_OVERRIDE_RE.match(plain, cite_end)
+    pos = pre.end() if pre else cite_end
+    om = _OVERRIDE_RE.match(plain, pos)
+    if not om:
+        return ""
+    inner = om.group(1).strip()
+    return inner if _is_valid_short_name_override(inner) else ""
+
+
 # ── CASE CITATION EXTRACTION ────────────────────────────────────────────────────
 
 def _make_case(key, case_name, year, volume, reporter, first_page,
                span, match_text, *, wl_only=False, lexis_only=False,
-               slip_only=False, short_name=""):
+               slip_only=False, short_name="", short_name_override=""):
     """Construct a case Citation with resolution data populated."""
     if wl_only or lexis_only or slip_only:
         fallback = build_google_scholar_name_url(case_name or key)
@@ -751,6 +926,10 @@ def _make_case(key, case_name, year, volume, reporter, first_page,
     short_names = []
     if case_name:
         short_names.append(case_name)
+    # The author's own short name is, by definition, a string they intend as a
+    # reference to this case — so it is also an alias the client may link.
+    if short_name_override and short_name_override not in short_names:
+        short_names.append(short_name_override)
 
     return Citation(
         type="case", key=key, display=case_name and f"{case_name} {key}" or key,
@@ -761,7 +940,10 @@ def _make_case(key, case_name, year, volume, reporter, first_page,
         wl_only=wl_only, lexis_only=lexis_only, slip_only=slip_only,
         provider_lock=provider_lock,
         lexis_search_term=lexis_term, westlaw_search_cite=wl_cite,
-        short_name=short_name or _short_name(case_name or ""),
+        # Override beats the derived plaintiff surname.
+        short_name=(short_name_override or short_name
+                    or _short_name(case_name or "")),
+        short_name_override=short_name_override,
         short_names=short_names,
     )
 
@@ -806,37 +988,40 @@ def _extract_cases(plain):
         full_span = (plaintiff_start, v_end + mm.end())
         match_text = plain[full_span[0]:full_span[1]]
         sname = _short_name(plaintiff_clean)
+        snO = _short_name_override(plain, full_span[1])
 
         if kind in ("csm",):
             year, vol, rep, page = mm.group(1), mm.group(2), mm.group(3), mm.group(4)
             key = f"{vol} {_normalize_reporter(rep)} {page}"
             results.append(_make_case(key, case_name, year, vol,
                                       _normalize_reporter(rep), page,
-                                      full_span, match_text, short_name=sname))
+                                      full_span, match_text, short_name=sname,
+                                      short_name_override=snO))
         elif kind in ("bb", "flat"):
             vol, rep, page, year = mm.group(1), mm.group(2), mm.group(3), mm.group(4)
             key = f"{vol} {_normalize_reporter(rep)} {page}"
             results.append(_make_case(key, case_name, year, vol,
                                       _normalize_reporter(rep), page,
-                                      full_span, match_text, short_name=sname))
+                                      full_span, match_text, short_name=sname,
+                                      short_name_override=snO))
         elif kind == "wl":
             wl_year, wl_num = mm.group(1), mm.group(2)
             key = f"{wl_year} WL {wl_num}"
             results.append(_make_case(key, case_name, mm.group(3), None, None, None,
                                       full_span, match_text, wl_only=True,
-                                      short_name=sname))
+                                      short_name=sname, short_name_override=snO))
         elif kind == "lexis":
             lx_year, lx_num = mm.group(1), mm.group(2)
             key = f"{lx_year} U.S. Dist. LEXIS {lx_num}"
             results.append(_make_case(key, case_name, mm.group(3), None, None, None,
                                       full_span, match_text, lexis_only=True,
-                                      short_name=sname))
+                                      short_name=sname, short_name_override=snO))
         else:  # slip
             docket = mm.group(1)
             key = f"Case No. {docket}"
             results.append(_make_case(key, case_name, "", None, None, None,
                                       full_span, match_text, slip_only=True,
-                                      short_name=sname))
+                                      short_name=sname, short_name_override=snO))
 
     # In re / Estate of / Guardianship of / Conservatorship of / Adoption of /
     # Marriage of (no "v." anchor)
@@ -854,13 +1039,16 @@ def _extract_cases(plain):
             key = f"{wl_year} WL {wl_num}"
             results.append(_make_case(key, full_name, year, None, None, None,
                                       m.span(), m.group(0), wl_only=True,
-                                      short_name=_short_name(full_name)))
+                                      short_name=_short_name(full_name),
+                                      short_name_override=_short_name_override(
+                                          plain, m.end())))
             continue
         key = f"{vol} {_normalize_reporter(rep)} {page}"
         results.append(_make_case(
             key, full_name, year, vol, _normalize_reporter(rep), page,
             m.span(), m.group(0),
             short_name=_short_name(full_name),
+            short_name_override=_short_name_override(plain, m.end()),
         ))
 
     # "[Subject] Cases" — consolidated-litigation names with no v./In re.
@@ -875,6 +1063,7 @@ def _extract_cases(plain):
             key, name, year, vol, _normalize_reporter(rep), page,
             m.span(), m.group(0),
             short_name=name.split()[0] if name.split() else name,
+            short_name_override=_short_name_override(plain, m.end()),
         ))
 
     return results
@@ -992,13 +1181,18 @@ def _extract_rules(plain):
 
 def _deduplicate(citations):
     """One Citation per unique key (first occurrence wins for metadata).
-    short_names are merged so later aliases of the same case are preserved."""
+    short_names are merged so later aliases of the same case are preserved.
+    A short-name override found on any occurrence is adopted by the survivor —
+    the author may give it on a later cite than the first."""
     seen = {}
     for c in citations:
         if c.key not in seen:
             seen[c.key] = c
         else:
             existing = seen[c.key]
+            if c.short_name_override and not existing.short_name_override:
+                existing.short_name_override = c.short_name_override
+                existing.short_name = c.short_name_override
             for alias in (c.short_names or []):
                 if alias and alias not in existing.short_names:
                     existing.short_names.append(alias)
@@ -1010,6 +1204,119 @@ def _deduplicate(citations):
 def _normalize_party(s):
     s = re.sub(r"[.,;:'\"]", "", s.lower())
     return re.sub(r"\s+", " ", s).strip()
+
+
+_PD_RE = re.compile(r"^(.+?)\s+v\.\s+(.+?)$")
+
+
+class SupraIndex:
+    """First-seen resolution maps for supra and bare short-form references.
+
+    Resolution priority (ported from ShortCite's PreScanDocument):
+
+        1. short name  — the author's "(Grand Terrace)" override, then the
+                         derived plaintiff surname
+        2. reporter volume — "Aguilar, supra, 25 Cal.4th at p. 850" resolves
+                         on "25 Cal.4th" even when the name doesn't match
+        3. party name  — fall back to matching the plaintiff of a full cite
+
+    Both the extractor and the Word bridge feed this the same way: `add()`
+    every full cite in document order, then `resolve_supra()` / `resolve_parties()`.
+    """
+
+    def __init__(self):
+        self._by_override = {}     # norm(override) -> Citation
+        self._by_short = {}        # norm(short name) -> Citation
+        self._by_reporter = {}     # (volume, reporter) -> Citation
+        self._by_parties = {}      # (p_norm, d_norm) -> Citation
+        self._by_party = {}        # p_norm -> Citation
+
+    def add(self, c):
+        if getattr(c, "type", None) != "case":
+            return
+
+        if c.short_name_override:
+            self._by_override.setdefault(_normalize_party(c.short_name_override), c)
+        if c.short_name:
+            self._by_short.setdefault(_normalize_party(c.short_name), c)
+        derived = _short_name(c.case_name or "")
+        if derived:
+            self._by_short.setdefault(_normalize_party(derived), c)
+
+        if c.volume and c.reporter:
+            self._by_reporter.setdefault(
+                (str(c.volume), _normalize_reporter(c.reporter)), c)
+
+        if not c.case_name:
+            return
+        pm = _PD_RE.match(c.case_name)
+        if not pm:
+            # "In re Marriage of Bonds" and the like: no party split.
+            self._by_party.setdefault(_normalize_party(c.case_name), c)
+            return
+
+        p_raw, d_raw = pm.group(1), pm.group(2)
+        d_norm = _normalize_party(d_raw)
+        self._by_parties.setdefault((_normalize_party(p_raw), d_norm), c)
+        self._by_party.setdefault(_normalize_party(p_raw), c)
+
+        # Defensive: the name walk-back can absorb a leading intro word
+        # ("Separately, Donlen v. Ford ..."). Register the post-comma
+        # plaintiff too so later short forms still resolve.
+        p_stripped = re.sub(r"^[^,]*,\s*", "", p_raw)
+        if p_stripped and p_stripped != p_raw:
+            self._by_parties.setdefault((_normalize_party(p_stripped), d_norm), c)
+            self._by_party.setdefault(_normalize_party(p_stripped), c)
+            alt_short = _short_name(p_stripped)
+            if alt_short:
+                self._by_short.setdefault(_normalize_party(alt_short), c)
+
+    def resolve_supra(self, name, volume=None, reporter=None):
+        """Return the Citation a 'name, supra' reference points at, or None."""
+        key = _normalize_party(name)
+
+        # 1. short name — override first, then derived.
+        for table in (self._by_override, self._by_short):
+            hit = table.get(key)
+            if hit is not None:
+                return hit
+
+        # A full "X v. Y, supra" core.
+        pm = _PD_RE.match(name)
+        if pm:
+            hit = self._by_parties.get(
+                (_normalize_party(pm.group(1)), _normalize_party(pm.group(2))))
+            if hit is not None:
+                return hit
+
+        # Single-token fallback ("City of Grand Terrace, supra" -> "City").
+        first = _normalize_party(_short_name(name))
+        if first and first != key:
+            for table in (self._by_override, self._by_short):
+                hit = table.get(first)
+                if hit is not None:
+                    return hit
+
+        # 2. reporter volume.
+        if volume and reporter:
+            hit = self._by_reporter.get((str(volume), _normalize_reporter(reporter)))
+            if hit is not None:
+                return hit
+
+        # 3. party name.
+        return self._by_party.get(key)
+
+    def resolve_parties(self, plaintiff, defendant):
+        """Return the Citation a bare 'X v. Y' short form points at, or None."""
+        p_norm = _normalize_party(plaintiff)
+        d_norm = _normalize_party(defendant)
+        hit = self._by_parties.get((p_norm, d_norm))
+        if hit is not None:
+            return hit
+        for (rp, rd), c in self._by_parties.items():
+            if rp == p_norm and (rd.startswith(d_norm) or d_norm.startswith(rd)):
+                return c
+        return None
 
 
 def _augment_aliases(deduped, plain_blocks):
@@ -1024,26 +1331,19 @@ def _augment_aliases(deduped, plain_blocks):
     if not cases:
         return
 
-    by_short = {}                       # short_name -> Citation (first-seen)
-    by_parties = {}                     # (p_norm, d_norm) -> Citation
-    pd_re = re.compile(r"^(.+?)\s+v\.\s+(.+?)$")
+    index = SupraIndex()
     for c in cases:
-        if c.short_name:
-            by_short.setdefault(c.short_name, c)
-        if c.case_name:
-            pm = pd_re.match(c.case_name)
-            if pm:
-                by_parties.setdefault(
-                    (_normalize_party(pm.group(1)), _normalize_party(pm.group(2))), c
-                )
+        index.add(c)
 
     for plain in plain_blocks:
-        # supra: "Smith, supra" / "Smith v. Jones, supra"
-        for m in SUPRA_RE.finditer(plain):
-            sname = _short_name(m.group(1))
-            target = by_short.get(sname)
-            if target and m.group(0) not in target.short_names:
-                target.short_names.append(m.group(0))
+        # supra: "Smith, supra" / "Grand Terrace, supra, 192 Cal.App.3d at p. 1261"
+        for ref in iter_supra(plain):
+            target = index.resolve_supra(ref.name, ref.volume, ref.reporter)
+            if target is None:
+                continue
+            alias = f"{ref.name}, supra"
+            if alias not in target.short_names:
+                target.short_names.append(alias)
 
         # bare "X v. Y" short forms
         for m in SHORT_FORM_RE.finditer(plain):
@@ -1051,14 +1351,7 @@ def _augment_aliases(deduped, plain_blocks):
             defendant = m.group(2).strip()
             if not plaintiff:
                 continue
-            p_norm = _normalize_party(plaintiff)
-            d_norm = _normalize_party(defendant)
-            target = by_parties.get((p_norm, d_norm))
-            if target is None:
-                for (rp, rd), c in by_parties.items():
-                    if rp == p_norm and (rd.startswith(d_norm) or d_norm.startswith(rd)):
-                        target = c
-                        break
+            target = index.resolve_parties(plaintiff, defendant)
             if target is None:
                 continue
             alias = f"{plaintiff} v. {defendant}"
