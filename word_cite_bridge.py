@@ -82,9 +82,6 @@ def _overlaps(s, e, spans):
     return False
 
 
-_PD_RE = re.compile(r"^(.+?)\s+v\.\s+(.+?)$")
-
-
 def extract_rows(doc_html, repo=None):
     rows = []
 
@@ -92,8 +89,7 @@ def extract_rows(doc_html, repo=None):
     # document-wide first-seen resolution maps (mirrors _augment_aliases).
     blocks = []                       # (block_index, plain)
     spans_by_block = {}               # block_index -> [(start, end), ...]
-    by_short = {}                     # short_name -> case Citation (first-seen)
-    by_parties = {}                   # (p_norm, d_norm) -> case Citation
+    index = ce.SupraIndex()           # shared first-seen resolution maps
 
     for block_index, (block_html, _offset) in enumerate(ce._split_blocks(doc_html)):
         plain = ce._normalize_ws(ce._strip_tags(block_html))
@@ -125,28 +121,10 @@ def extract_rows(doc_html, repo=None):
                 c.type, url, _flatten(plain[start:end]),
             ]))
 
-            if c.type == "case":
-                short = c.short_name
-                if short:
-                    by_short.setdefault(short, c)
-                if c.case_name:
-                    pm = _PD_RE.match(c.case_name)
-                    if pm:
-                        p_raw, d_raw = pm.group(1), pm.group(2)
-                        d_norm = ce._normalize_party(d_raw)
-                        by_parties.setdefault(
-                            (ce._normalize_party(p_raw), d_norm), c)
-                        # Defensive: the extractor's name walk-back can absorb a
-                        # leading intro word ("Separately, Donlen v. Ford ...").
-                        # Register the post-comma plaintiff too so later bare
-                        # short forms ("Donlen v. Ford ...") still resolve.
-                        p_stripped = re.sub(r"^[^,]*,\s*", "", p_raw)
-                        if p_stripped and p_stripped != p_raw:
-                            by_parties.setdefault(
-                                (ce._normalize_party(p_stripped), d_norm), c)
-                            alt_short = ce._short_name(p_stripped)
-                            if alt_short:
-                                by_short.setdefault(alt_short, c)
+            # Registers short-name override, derived short name, reporter
+            # volume, and party names — including the defensive post-comma
+            # plaintiff for walk-backs that absorbed an intro word.
+            index.add(c)
         spans_by_block[block_index] = spans
 
     # Pass 2: supra and bare "X v. Y" short forms that resolve to a full cite,
@@ -154,11 +132,11 @@ def extract_rows(doc_html, repo=None):
     for block_index, plain in blocks:
         spans = spans_by_block.get(block_index, [])
 
-        for m in ce.SUPRA_RE.finditer(plain):
-            s, e = m.start(1), m.end(1)
+        for ref in ce.iter_supra(plain):
+            s, e = ref.start, ref.end
             if _overlaps(s, e, spans):
                 continue
-            target = by_short.get(ce._short_name(m.group(1)))
+            target = index.resolve_supra(ref.name, ref.volume, ref.reporter)
             if target is None:
                 continue
             url = resolve_url(target)
@@ -177,14 +155,7 @@ def extract_rows(doc_html, repo=None):
             defendant = m.group(2).strip()
             if not plaintiff:
                 continue
-            p_norm = ce._normalize_party(plaintiff)
-            d_norm = ce._normalize_party(defendant)
-            target = by_parties.get((p_norm, d_norm))
-            if target is None:
-                for (rp, rd), c in by_parties.items():
-                    if rp == p_norm and (rd.startswith(d_norm) or d_norm.startswith(rd)):
-                        target = c
-                        break
+            target = index.resolve_parties(plaintiff, defendant)
             if target is None:
                 continue
             url = resolve_url(target)
