@@ -8,7 +8,12 @@ in place.
 
 USAGE
 -----
-    python word_cite_bridge.py <input_html> <output_tsv> [<repo_json>]
+    python word_cite_bridge.py <input_html> <output_tsv> [<repo_json>] \
+        [--provider lexis|westlaw]
+
+The optional --provider flag chooses which provider's search URLs to build
+(default: lexis). It may appear anywhere in the argument list; a single-database
+cite's provider_lock still overrides it (see search_urls.resolve_url).
 
 CONTRACT WITH THE MACRO
 -----------------------
@@ -26,10 +31,10 @@ OUTPUT (UTF-8, one record per line, tab-separated)
   start, end  : character offsets into the block's normalized plain text
                 (end exclusive, Python slice semantics)
   type        : "case" | "statute" | "rule"
-  url         : live provider search URL (search_urls.resolve_url): a Lexis+
-                search by default, falling back to Westlaw for cites Lexis
-                can't anchor (e.g. WL-only unpublished cases) and for any cite
-                whose provider_lock forces Westlaw.
+  url         : live provider search URL (search_urls.resolve_url) for the
+                provider chosen by --provider (default lexis), falling back to
+                Westlaw for cites Lexis can't anchor (e.g. WL-only unpublished
+                cases) and for any cite whose provider_lock forces Westlaw.
   match_text  : the literal matched text (tabs/newlines flattened to spaces);
                 used for the macro's Find fallback and for the link ScreenTip
 
@@ -47,9 +52,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import citation_extractor as ce  # noqa: E402
 from search_urls import resolve_url  # noqa: E402
 
-# Live provider search URL for a citation. Lexis+ is primary; Westlaw is the
-# fallback for cites Lexis can't anchor and for provider-locked cites. Shared
-# with the Workup Search web app's client logic via search_urls (both ports of
+# Live provider search URL for a citation. The default provider is chosen by
+# the --provider flag (lexis unless overridden); Westlaw is also the fallback
+# for cites Lexis can't anchor and for provider-locked cites. Shared with the
+# Workup Search web app's client logic via search_urls (both ports of
 # pdf-viewer/viewer resolveUrl); see search_urls.py.
 
 
@@ -82,7 +88,7 @@ def _overlaps(s, e, spans):
     return False
 
 
-def extract_rows(doc_html, repo=None):
+def extract_rows(doc_html, repo=None, provider="lexis"):
     rows = []
 
     # Pass 1: full citations. Record their spans per block and build the
@@ -108,7 +114,7 @@ def extract_rows(doc_html, repo=None):
         for c in cites:
             if c.match_start is None or c.match_end is None:
                 continue
-            url = resolve_url(c)
+            url = resolve_url(c, provider)
             if not url:
                 continue
             start = _trim_leading_separator(plain, c.match_start, c.match_end)
@@ -139,7 +145,7 @@ def extract_rows(doc_html, repo=None):
             target = index.resolve_supra(ref.name, ref.volume, ref.reporter)
             if target is None:
                 continue
-            url = resolve_url(target)
+            url = resolve_url(target, provider)
             if not url:
                 continue
             rows.append("\t".join([
@@ -158,7 +164,7 @@ def extract_rows(doc_html, repo=None):
             target = index.resolve_parties(plaintiff, defendant)
             if target is None:
                 continue
-            url = resolve_url(target)
+            url = resolve_url(target, provider)
             if not url:
                 continue
             # Strip the leading signal word ("But", "See", ...) from the link
@@ -176,10 +182,39 @@ def extract_rows(doc_html, repo=None):
     return rows
 
 
+def _pop_provider(argv):
+    """Pull an optional "--provider VALUE" (or "--provider=VALUE") out of argv.
+
+    Returns (provider, remaining_argv) with the flag removed so the rest can be
+    parsed positionally as before. Unknown/absent -> "lexis", preserving the
+    historical default for callers that don't pass the flag."""
+    provider = "lexis"
+    out = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--provider" and i + 1 < len(argv):
+            provider = argv[i + 1].strip().lower()
+            i += 2
+            continue
+        if a.startswith("--provider="):
+            provider = a[len("--provider="):].strip().lower()
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    if provider not in ("lexis", "westlaw"):
+        provider = "lexis"
+    return provider, out
+
+
 def main(argv):
+    provider, argv = _pop_provider(argv)
+
     if len(argv) < 3:
         sys.stderr.write(
-            "usage: word_cite_bridge.py <input_html> <output_tsv> [<repo_json>]\n"
+            "usage: word_cite_bridge.py <input_html> <output_tsv> [<repo_json>] "
+            "[--provider lexis|westlaw]\n"
         )
         return 2
 
@@ -192,7 +227,7 @@ def main(argv):
     with open(in_path, encoding="utf-8-sig") as fh:
         doc_html = fh.read()
 
-    rows = extract_rows(doc_html, repo)
+    rows = extract_rows(doc_html, repo, provider)
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(rows))
