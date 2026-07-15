@@ -8,8 +8,7 @@ in place.
 
 USAGE
 -----
-    python word_cite_bridge.py <input_html> <output_tsv> [<repo_json>] \
-        [--provider lexis|westlaw]
+    python word_cite_bridge.py <input_html> <output_tsv> [--provider lexis|westlaw]
 
 The optional --provider flag chooses which provider's search URLs to build
 (default: lexis). It may appear anywhere in the argument list; a single-database
@@ -46,7 +45,6 @@ overlap within a paragraph.
 import os
 import re
 import sys
-import json
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import citation_extractor as ce  # noqa: E402
@@ -88,7 +86,7 @@ def _overlaps(s, e, spans):
     return False
 
 
-def extract_rows(doc_html, repo=None, provider="lexis"):
+def extract_rows(doc_html, provider="lexis"):
     rows = []
 
     # Pass 1: full citations. Record their spans per block and build the
@@ -107,8 +105,6 @@ def extract_rows(doc_html, repo=None, provider="lexis"):
         cites.extend(ce._extract_cases(plain))
         cites.extend(ce._extract_statutes(plain))
         cites.extend(ce._extract_rules(plain))
-        if repo:
-            ce.apply_repo(cites, repo)
 
         spans = []
         for c in cites:
@@ -213,21 +209,17 @@ def main(argv):
 
     if len(argv) < 3:
         sys.stderr.write(
-            "usage: word_cite_bridge.py <input_html> <output_tsv> [<repo_json>] "
+            "usage: word_cite_bridge.py <input_html> <output_tsv> "
             "[--provider lexis|westlaw]\n"
         )
         return 2
 
     in_path, out_path = argv[1], argv[2]
-    repo = None
-    if len(argv) > 3 and argv[3] and os.path.exists(argv[3]):
-        with open(argv[3], encoding="utf-8") as fh:
-            repo = json.load(fh)
 
     with open(in_path, encoding="utf-8-sig") as fh:
         doc_html = fh.read()
 
-    rows = extract_rows(doc_html, repo, provider)
+    rows = extract_rows(doc_html, provider)
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(rows))

@@ -36,17 +36,8 @@ WHAT CHANGED IN THIS REVISION (ported from pdf_linker.py)
   8. First-seen supra resolution + bare "X v. Y" short-form aliases,
      exposed via `short_name` / `short_names` for client-side re-linking.
 
-  The repo lookup (apply_repo) and the auto-constructed fallback URLs
-  (Google Scholar / leginfo / courts.ca.gov) are unchanged in behavior.
-
-FUTURE MACRO INTEGRATION
--------------------------
-  The Word macro should POST to /cite_repo with:
-    { "type": "case"|"statute"|"rule",
-      "key":  "<canonical key string>",
-      "url":  "<lexis url>",
-      "case_name": "<optional>",
-      "added_by": "macro" }
+  The auto-constructed fallback URLs (Google Scholar / leginfo /
+  courts.ca.gov) are unchanged in behavior.
 """
 
 import re

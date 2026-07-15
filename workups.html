@@ -2189,7 +2189,7 @@ async function selectResult(card, r, query) {
 
 // ── CITATION LINK INJECTION ────────────────────────────────────────────────────
 // caseNameByKey: populated during injection, maps key -> extracted full display name
-// Used by renderCitePanel and auto-saved to cite_repo on first detection.
+// Used by renderCitePanel and the add-case-name popover for the current session.
 const caseNameByKey = {};
 
 function injectCitationLinks(html, citations) {
@@ -2642,7 +2642,6 @@ function openAddEmPopover(c, docId, anchorEl) {
   document.getElementById('cep-title').textContent = 'ADD CASE NAME';
   document.getElementById('cep-msg').textContent   = '';
   document.getElementById('cep-msg').className     = 'cep-msg';
-  document.getElementById('cep-reset-btn').style.display = 'none';
   pop.classList.add('open');
   const rect = anchorEl.getBoundingClientRect();
   const popW = 420;
@@ -2727,12 +2726,7 @@ function toggleCitePanel() {
 function initEditPopover() {
   document.getElementById('cep-cancel-btn').addEventListener('click', closeEditPopover);
   document.getElementById('cep-save-btn').addEventListener('click', saveEditPopover);
-  document.getElementById('cep-reset-btn').addEventListener('click', resetEditPopover);
   document.getElementById('cep-url-input').addEventListener('keydown', e => {
-    if (e.key === 'Enter') saveEditPopover();
-    if (e.key === 'Escape') closeEditPopover();
-  });
-  document.getElementById('cep-westlaw-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') saveEditPopover();
     if (e.key === 'Escape') closeEditPopover();
   });
@@ -2742,194 +2736,44 @@ function initEditPopover() {
   });
 }
 
-function openEditPopover(citation, docId, anchorEl) {
-  cepCurrentCitation = { ...citation, _docId: docId };
-  const pop = document.getElementById('cite-edit-popover');
-  document.getElementById('cep-key-display').textContent = citation.display;
-  document.getElementById('cep-msg').textContent = '';
-  document.getElementById('cep-msg').className   = 'cep-msg';
-
-  const isCase = citation.type === 'case';
-  const hasWestlawField = true; // statutes and rules can also have Westlaw URLs
-
-  // Lexis field — primary URL field
-  const lexisLabel = document.getElementById('cep-label');
-  const lexisInput = document.getElementById('cep-url-input');
-  lexisLabel.textContent = 'Lexis+ URL';
-  lexisInput.placeholder = 'https://plus.lexis.com/…';
-  lexisInput.value = citation.lexis_url || (citation.source === 'lexis' ? citation.url : '') || '';
-
-  // Westlaw field
-  const wDiv   = document.getElementById('cep-westlaw-divider');
-  const wLabel = document.getElementById('cep-westlaw-label');
-  const wInput = document.getElementById('cep-westlaw-input');
-  wDiv.style.display   = hasWestlawField ? '' : 'none';
-  wLabel.style.display = hasWestlawField ? '' : 'none';
-  wInput.style.display = hasWestlawField ? '' : 'none';
-  wInput.value = citation.westlaw_url || '';
-
-  // Case name field — shown only for case citations
-  const nameLabel = document.getElementById('cep-name-label');
-  const nameInput = document.getElementById('cep-name-input');
-  if (isCase) {
-    nameLabel.style.display = '';
-    nameInput.style.display = '';
-    nameInput.value = caseNameByKey[citation.key] || citation.case_name || '';
-  } else {
-    nameLabel.style.display = 'none';
-    nameInput.style.display = 'none';
-    nameInput.value = '';
-  }
-
-  // Reset button — shown when Lexis URL differs from fallback
-  const resetBtn = document.getElementById('cep-reset-btn');
-  resetBtn.style.display = (citation.fallback_url && citation.fallback_url !== citation.url)
-    ? 'inline-block' : 'none';
-
-  pop.classList.add('open');
-  const rect = anchorEl.getBoundingClientRect();
-  const popW = 420;
-  let left = rect.left - popW - 8;
-  if (left < 8) left = Math.min(rect.right + 8, window.innerWidth - popW - 8);
-  let top = rect.top;
-  if (top + 280 > window.innerHeight) top = window.innerHeight - 290;
-  pop.style.left = `${Math.max(8, left)}px`;
-  pop.style.top  = `${Math.max(8, top)}px`;
-  lexisInput.focus();
-}
-
 function closeEditPopover() {
   const pop = document.getElementById('cite-edit-popover');
   if (pop) pop.classList.remove('open');
-  const labelEl = document.getElementById('cep-label');
-  const titleEl = document.getElementById('cep-title');
-  const urlInput = document.getElementById('cep-url-input');
-  const wInput   = document.getElementById('cep-westlaw-input');
-  if (labelEl)  labelEl.textContent  = 'Lexis+ URL';
-  if (titleEl)  titleEl.textContent  = 'EDIT CITATION URL';
-  if (urlInput) urlInput.placeholder = 'https://plus.lexis.com/…';
-  if (wInput)   wInput.value         = '';
   cepCurrentCitation = null;
-}
-
-function resetEditPopover() {
-  if (!cepCurrentCitation) return;
-  document.getElementById('cep-url-input').value = cepCurrentCitation.fallback_url || '';
-  document.getElementById('cep-msg').textContent = 'URL reset to default — click Save to confirm.';
 }
 
 async function saveEditPopover() {
   if (!cepCurrentCitation) return;
   const msg = document.getElementById('cep-msg');
 
-  // add_em mode: save case name, not URL
-  if (cepCurrentCitation._mode === 'add_em') {
-    const caseName = document.getElementById('cep-url-input').value.trim();
-    if (!caseName) { msg.textContent = 'Name cannot be empty.'; msg.className = 'cep-msg err'; return; }
-    const c = cepCurrentCitation;
-    caseNameByKey[c.key] = caseName;
-    await fetch(`${API}/cite_name`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: c.key, case_name: caseName })
-    }).catch(() => {});
-    msg.textContent = 'Saved.';
-    setTimeout(async () => {
-      closeEditPopover();
-      const contentData = await fetch(`${API}/content?id=${c._docId}`).then(x => x.json()).catch(() => null);
-      const citeData    = await fetch(`${API}/citations?id=${c._docId}`).then(x => x.json()).catch(() => null);
-      if (contentData && citeData) {
-        const citations = citeData.citations || [];
-        // Patch case_name from in-memory map so Pass C can link the full name immediately,
-        // even if the server response hasn't propagated the new name yet.
-        citations.forEach(ct => {
-          if (ct.type === 'case' && caseNameByKey[ct.key]) ct.case_name = caseNameByKey[ct.key];
-        });
-        let docHtml = contentData.html || '';
-        if (citations.length) docHtml = injectCitationLinks(docHtml, citations);
-        const body = document.getElementById('preview-body');
-        if (body) body.innerHTML = `<div id="preview-content">${docHtml}</div>`;
-        renderCitePanel(citations, c._docId);
-      }
-    }, 600);
-    return;
-  }
-
-  // Normal URL edit mode — Lexis and Westlaw fields handled independently
-  const lexisUrl   = document.getElementById('cep-url-input').value.trim();
-  const westlawUrl = document.getElementById('cep-westlaw-input').value.trim();
-  if (!lexisUrl && !westlawUrl) {
-    msg.textContent = 'At least one URL is required.';
-    msg.className = 'cep-msg err';
-    return;
-  }
+  // Save the case name typed for a citation whose <em> name wasn't detected.
+  const caseName = document.getElementById('cep-url-input').value.trim();
+  if (!caseName) { msg.textContent = 'Name cannot be empty.'; msg.className = 'cep-msg err'; return; }
   const c = cepCurrentCitation;
-
-  // Save case name if changed
-  const newCaseName = (c.type === 'case')
-    ? (document.getElementById('cep-name-input').value.trim() || '')
-    : '';
-  if (c.type === 'case' && newCaseName && newCaseName !== (caseNameByKey[c.key] || c.case_name || '')) {
-    caseNameByKey[c.key] = newCaseName;
-    fetch(`${API}/cite_name`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ key: c.key, case_name: newCaseName })
-    }).catch(() => {});
-  }
-
-  function buildPayload(url, source) {
-    const isReset = (url === c.fallback_url);
-    const resolvedName = (c.type === 'case') ? (newCaseName || c.case_name) : undefined;
-    const p = {
-      type: c.type, key: c.key, url,
-      source:       isReset ? 'auto' : source,
-      added_by:     'manual',
-      fallback_url: c.fallback_url,
-    };
-    if (c.type === 'case')    Object.assign(p, { case_name: resolvedName, year: c.year, volume: c.volume, reporter: c.reporter, first_page: c.first_page });
-    if (c.type === 'statute') Object.assign(p, { code_name: c.code_name, law_code: c.law_code, section: c.section });
-    if (c.type === 'rule')    p.rule_number = c.rule_number;
-    return p;
-  }
-
-  try {
-    const posts = [];
-    if (lexisUrl) {
-      const src = (lexisUrl.includes('plus.lexis.com') || lexisUrl.includes('lexisnexis.com')) ? 'lexis' : 'manual';
-      posts.push(fetch(`${API}/cite_repo`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload(lexisUrl, src))
-      }).then(x => x.json()));
+  caseNameByKey[c.key] = caseName;
+  await fetch(`${API}/cite_name`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ key: c.key, case_name: caseName })
+  }).catch(() => {});
+  msg.textContent = 'Saved.';
+  setTimeout(async () => {
+    closeEditPopover();
+    const contentData = await fetch(`${API}/content?id=${c._docId}`).then(x => x.json()).catch(() => null);
+    const citeData    = await fetch(`${API}/citations?id=${c._docId}`).then(x => x.json()).catch(() => null);
+    if (contentData && citeData) {
+      const citations = citeData.citations || [];
+      // Patch case_name from in-memory map so Pass C can link the full name immediately,
+      // even if the server response hasn't propagated the new name yet.
+      citations.forEach(ct => {
+        if (ct.type === 'case' && caseNameByKey[ct.key]) ct.case_name = caseNameByKey[ct.key];
+      });
+      let docHtml = contentData.html || '';
+      if (citations.length) docHtml = injectCitationLinks(docHtml, citations);
+      const body = document.getElementById('preview-body');
+      if (body) body.innerHTML = `<div id="preview-content">${docHtml}</div>`;
+      renderCitePanel(citations, c._docId);
     }
-    if (westlawUrl) {
-      const src = westlawUrl.includes('westlaw.com') ? 'westlaw' : 'manual';
-      posts.push(fetch(`${API}/cite_repo`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(buildPayload(westlawUrl, src))
-      }).then(x => x.json()));
-    }
-    const results = await Promise.all(posts);
-    const allOk = results.every(r => r.ok);
-    if (allOk) {
-      msg.textContent = 'Saved.';
-      setTimeout(async () => {
-        closeEditPopover();
-        const citeData = await fetch(`${API}/citations?id=${c._docId}`).then(x => x.json()).catch(() => null);
-        if (citeData) {
-          const citations = citeData.citations || [];
-          const contentData = await fetch(`${API}/content?id=${c._docId}`).then(x => x.json()).catch(() => null);
-          if (contentData) {
-            const body = document.getElementById('preview-body');
-            if (body) {
-              let docHtml = contentData.html || escHtml(contentData.text || '');
-              if (citations.length) docHtml = injectCitationLinks(docHtml, citations);
-              body.innerHTML = `<div id="preview-content">${docHtml}</div>`;
-            }
-          }
-          renderCitePanel(citations, c._docId);
-        }
-      }, 600);
-    } else { msg.textContent = results.find(r => !r.ok)?.error || 'Save failed.'; msg.className = 'cep-msg err'; }
-  } catch { msg.textContent = 'Could not reach server.'; msg.className = 'cep-msg err'; }
+  }, 600);
 }
 
 // ── PREVIEW TAG ROW ───────────────────────────────────────────────────────────
@@ -3170,17 +3014,11 @@ init();
 
 <!-- CITATION EDIT POPOVER (singleton) -->
 <div class="cite-edit-popover" id="cite-edit-popover">
-  <div class="cep-title" id="cep-title">EDIT CITATION URL</div>
+  <div class="cep-title" id="cep-title">ADD CASE NAME</div>
   <div class="cep-key" id="cep-key-display"></div>
-  <div class="cep-label" id="cep-name-label" style="display:none">Case name</div>
-  <input class="cep-input" id="cep-name-input" type="text" placeholder="e.g. Baker v. Italian Maple Holdings, LLC (2017) 13 Cal.App.5th 1152" spellcheck="false" style="display:none">
-  <div class="cep-label" id="cep-label">Lexis+ URL</div>
-  <input class="cep-input" id="cep-url-input" type="text" placeholder="https://plus.lexis.com/…" spellcheck="false">
-  <hr class="cep-divider" id="cep-westlaw-divider">
-  <div class="cep-label" id="cep-westlaw-label">Westlaw URL</div>
-  <input class="cep-input" id="cep-westlaw-input" type="text" placeholder="https://1.next.westlaw.com/…" spellcheck="false">
+  <div class="cep-label" id="cep-label">Case name (as it should appear in links)</div>
+  <input class="cep-input" id="cep-url-input" type="text" placeholder="e.g. Baker v. Italian Maple Holdings, LLC (2017) 13 Cal.App.5th 1152" spellcheck="false">
   <div class="cep-actions">
-    <button class="cep-reset"  id="cep-reset-btn">↩ Restore default</button>
     <button class="cep-cancel" id="cep-cancel-btn">Cancel</button>
     <button class="cep-save"   id="cep-save-btn">Save</button>
   </div>
