@@ -1137,20 +1137,28 @@ def _extract_statutes(plain):
 # ── RULE CITATION EXTRACTION ────────────────────────────────────────────────────
 
 def _make_rule(rule_num, span, match_text, *, rpc=False):
+    # The search term never carries a subdivision: "rule 7.955(a)(1)" must
+    # search for "rule 7.955". Lexis and Westlaw index the rule itself, not its
+    # lettered subdivisions, so the trailing parenthetical only breaks the
+    # search. key/display/rule_number keep the full cite for fidelity; only the
+    # search term drops the "(a)(1)" tail (everything from the first paren).
+    base_num = rule_num.split("(")[0]
     if rpc:
         key = f"Cal. Rules of Prof. Conduct, rule {rule_num}"
         display = key
         url = build_rpc_fallback_url(rule_num)
+        search_term = f"Cal. Rules of Prof. Conduct, rule {base_num}"
     else:
         key = f"Cal. Rules of Court, rule {rule_num}"
         display = key
         url = build_courts_url(rule_num)
+        search_term = f"Cal. Rules of Court, rule {base_num}"
     return Citation(
         type="rule", key=key, display=display,
         url=url, fallback_url=url, source="auto",
         match_start=span[0], match_end=span[1], match_text=match_text,
-        rule_number=rule_num, lexis_search_term=key, westlaw_search_cite=key,
-        short_names=[],
+        rule_number=rule_num, lexis_search_term=search_term,
+        westlaw_search_cite=search_term, short_names=[],
     )
 
 
