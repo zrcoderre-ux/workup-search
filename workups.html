@@ -1700,8 +1700,9 @@ function addRefineTerm() {
   input.value = '';
   input.focus();
   updateChips();
+  // Refetch: term filtering happens server-side for both search and browse
   if (currentQuery) doSearch(currentQuery);
-  else renderResults();
+  else loadAll();
 }
 
 function removeRefineTerm(term, mode) {
@@ -1709,7 +1710,7 @@ function removeRefineTerm(term, mode) {
   else                excludeTerms = excludeTerms.filter(t => t !== term);
   updateChips();
   if (currentQuery) doSearch(currentQuery);
-  else renderResults();
+  else loadAll();
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -1870,22 +1871,13 @@ function extractDate(filename) {
 }
 
 function applyFiltersAndSort(results) {
-  // Motion type filter (client-side; tag filters are applied server-side)
+  // Motion type filter (client-side; tag and include/exclude term filters are
+  // applied server-side against full document content — re-filtering here
+  // against the 500-char snippet would wrongly drop docs whose match lies
+  // deeper in the text)
   let filtered = activeFilters.size > 0
     ? results.filter(r => activeFilters.has(r.folder))
     : results;
-
-  // Include/exclude: always applied client-side against filename and snippet (content excerpt)
-  if (includeTerms.length > 0)
-    filtered = filtered.filter(r => includeTerms.every(t => {
-      const h = r.filename.toLowerCase() + ' ' + (r.snippet || '').toLowerCase();
-      return h.includes(t.toLowerCase());
-    }));
-  if (excludeTerms.length > 0)
-    filtered = filtered.filter(r => !excludeTerms.some(t => {
-      const h = r.filename.toLowerCase() + ' ' + (r.snippet || '').toLowerCase();
-      return h.includes(t.toLowerCase());
-    }));
 
   filtered = [...filtered].sort((a, b) => {
     if (groupByType) {

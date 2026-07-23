@@ -272,9 +272,14 @@ def build_index():
 
             if row:
                 html = extract_html_from_docx(filepath_lp)
+                # Delete the FTS entry BEFORE updating documents. docs_fts is an
+                # external-content table: DELETE reads the row's *current* values
+                # from documents to know which index entries to remove. Deleting
+                # after the UPDATE strands the old tokens in the index (phantom
+                # matches on stale text) and corrupts it.
+                conn.execute("DELETE FROM docs_fts WHERE rowid=?", (row[0],))
                 conn.execute("UPDATE documents SET content=?, html=?, indexed_at=?, filesize=?, filehash=? WHERE id=?",
                              (content, html, now, src_size, src_hash, row[0]))
-                conn.execute("DELETE FROM docs_fts WHERE rowid=?", (row[0],))
                 conn.execute("INSERT INTO docs_fts(rowid, folder, filename, content) VALUES (?,?,?,?)",
                              (row[0], folder_name, filename, content))
                 updated += 1
@@ -304,7 +309,11 @@ def build_index():
     if deleted:
         conn.commit()
 
-    conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('optimize')")
+    # 'rebuild' re-derives the entire FTS index from the documents table. This
+    # keeps the index compact (subsumes 'optimize') and, importantly, repairs
+    # any corruption left in databases indexed before the delete-before-update
+    # fix above, where stale tokens caused wrong/missing search hits.
+    conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
     conn.commit()
     conn.close()
 
