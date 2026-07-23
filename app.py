@@ -8,6 +8,7 @@ Usage:
 """
 
 import os
+import re
 import sys
 import json
 import sqlite3
@@ -213,6 +214,34 @@ def attach_tags_to_results(conn, results):
     return results
 
 
+def strip_quotes(t):
+    """Strip surrounding straight/curly quotes from a user-typed term."""
+    return t.strip().strip('"\'\u201c\u201d\u2018\u2019')
+
+
+def fts_phrase(t):
+    """Wrap a term as a single FTS5 phrase, escaping embedded double quotes."""
+    return '"' + t.replace('"', '""') + '"'
+
+
+# Splits a query into quoted phrases (straight or curly quotes) and bare words.
+_QUERY_PART_RE = re.compile(r'"([^"]*)"|\u201c([^\u201d]*)\u201d|(\S+)')
+
+
+def query_to_fts(query):
+    """Build an FTS5 MATCH expression honoring the search box contract:
+    quoted text is an exact phrase; bare words must all appear (implicit AND).
+    Every part is phrase-quoted so FTS5 operators (AND, OR, NEAR, -, *) in
+    user input are matched literally instead of being interpreted."""
+    parts = []
+    for m in _QUERY_PART_RE.finditer(query):
+        text = next(g for g in m.groups() if g is not None)
+        text = strip_quotes(text)
+        if text:
+            parts.append(fts_phrase(text))
+    return " ".join(parts) if parts else fts_phrase(strip_quotes(query))
+
+
 def do_search(query, folder=None, include_terms=None, exclude_terms=None,
               tag_filters=None, limit=500):
     """Search documents. include_terms/exclude_terms are lists of additional FTS terms.
@@ -220,18 +249,14 @@ def do_search(query, folder=None, include_terms=None, exclude_terms=None,
     conn = get_db()
     ensure_tags_schema(conn)
 
-    def make_fts(q):
-        # Strip surrounding quotes the user may have typed; we wrap in FTS phrase quotes ourselves
-        q = q.strip().strip('"\'\u201c\u201d\u2018\u2019')
-        return f'"{q.replace(chr(34), chr(34)+chr(34))}"'
-    def strip_quotes(t):
-        return t.strip().strip('"\'\u201c\u201d\u2018\u2019')
-
-    fts_parts = [make_fts(query)]
+    fts_parts = [query_to_fts(query)]
     for t in (include_terms or []):
         if t.strip():
-            fts_parts.append(make_fts(t.strip()))
+            # A refine chip is a single word-or-phrase: match it whole
+            fts_parts.append(fts_phrase(strip_quotes(t)))
     fts_query = " ".join(fts_parts)
+
+    like_fallback = False
 
     try:
         if folder and folder != "all":
@@ -251,6 +276,7 @@ def do_search(query, folder=None, include_terms=None, exclude_terms=None,
                 ORDER BY rank LIMIT ?
             """, (fts_query, SUMMARIES_FOLDER, limit)).fetchall()
     except sqlite3.OperationalError:
+        like_fallback = True
         like = f"%{query}%"
         if folder and folder != "all":
             rows = conn.execute("""
@@ -268,7 +294,7 @@ def do_search(query, folder=None, include_terms=None, exclude_terms=None,
             """, (like, like, SUMMARIES_FOLDER, limit)).fetchall()
 
     results = []
-    terms = query.lower().split()
+    terms = [w for w in (strip_quotes(t).lower() for t in query.split()) if w]
     for r in rows:
         try:
             doc_content  = (r["content"] or "").lower()
@@ -276,6 +302,11 @@ def do_search(query, folder=None, include_terms=None, exclude_terms=None,
             haystack     = doc_content + " " + doc_filename
 
             if any(strip_quotes(t).lower() in haystack for t in (exclude_terms or []) if t.strip()):
+                continue
+
+            # The LIKE fallback query can't express include terms — apply them here
+            if like_fallback and not all(strip_quotes(t).lower() in haystack
+                                         for t in (include_terms or []) if t.strip()):
                 continue
 
             snippet = make_snippet(r["content"] or "", terms)
@@ -311,8 +342,12 @@ def do_search(query, folder=None, include_terms=None, exclude_terms=None,
             if r["filepath"] not in existing_fps:
                 if folder and folder != "all" and r["folder"] != folder:
                     continue
-                if any(strip_quotes(t).lower() in (r["content"] or "").lower() + " " + r["filename"].lower()
+                haystack = (r["content"] or "").lower() + " " + r["filename"].lower()
+                if any(strip_quotes(t).lower() in haystack
                        for t in (exclude_terms or []) if t.strip()):
+                    continue
+                if not all(strip_quotes(t).lower() in haystack
+                           for t in (include_terms or []) if t.strip()):
                     continue
                 results.append({
                     "id":         r["id"],
@@ -567,8 +602,8 @@ class Handler(BaseHTTPRequestHandler):
             raw_qs   = parsed.query
             # Parse filepath and tag carefully from raw query string
             # Use standard parse_qs for tag and action; filepath may contain special chars
-            tag      = unquote(qs.get("tag",    [""])[0]).strip()
-            action   = unquote(qs.get("action", [""])[0]).strip()
+            tag      = qs.get("tag",    [""])[0].strip()
+            action   = qs.get("action", [""])[0].strip()
             # Extract filepath: everything after "filepath=" up to "&tag=" or end
             fp_match = ""
             parts    = raw_qs.split("&")
@@ -584,18 +619,20 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "tags": new_tags})
 
         elif parsed.path == "/search":
-            query  = unquote(qs.get("q",      [""])[0]).strip()
-            folder = unquote(qs.get("folder", ["all"])[0]).strip()
-            inc    = [unquote(t) for t in qs.get("inc", [])]
-            exc    = [unquote(t) for t in qs.get("exc", [])]
-            tags   = [unquote(t) for t in qs.get("tag", [])]
+            # parse_qs has already percent-decoded the values — a second
+            # unquote() would corrupt terms containing %-sequences
+            query  = qs.get("q",      [""])[0].strip()
+            folder = qs.get("folder", ["all"])[0].strip()
+            inc    = qs.get("inc", [])
+            exc    = qs.get("exc", [])
+            tags   = qs.get("tag", [])
             if not query:
                 self.send_json([])
             else:
                 self.send_json(do_search(query, folder, inc, exc, tags or None))
 
         elif parsed.path == "/open":
-            filepath = unquote(qs.get("path", [""])[0])
+            filepath = qs.get("path", [""])[0]
             self.send_json(open_file(filepath))
 
         elif parsed.path == "/content":
@@ -603,10 +640,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(get_full_content(doc_id))
 
         elif parsed.path == "/browse":
-            folder = unquote(qs.get("folder", ["all"])[0]).strip()
-            tags   = [unquote(t) for t in qs.get("tag", [])]
-            inc    = [unquote(t) for t in qs.get("inc", [])]
-            exc    = [unquote(t) for t in qs.get("exc", [])]
+            folder = qs.get("folder", ["all"])[0].strip()
+            tags   = qs.get("tag", [])
+            inc    = qs.get("inc", [])
+            exc    = qs.get("exc", [])
             self.send_json(do_browse(folder, tags or None, inc or None, exc or None))
 
         elif parsed.path == "/ping":
@@ -634,7 +671,7 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/summary":
             # GET /summary?filepath=<source_filepath>
             # Constructs the summary path and returns its plain-text content from the DB.
-            src_path = unquote(qs.get("filepath", [""])[0])
+            src_path = qs.get("filepath", [""])[0]
             if not src_path:
                 self.send_json({"text": None})
             else:
