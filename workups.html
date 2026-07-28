@@ -74,8 +74,9 @@
   body.dark .sv-entry.sv-active { background: #0c2d4a; }
   body.dark .sv-entry-name      { color: #d0e4f4; }
   body.dark .sv-entry-text      { color: #8fb8d8; }
-  body.dark .sv-add-summary     { background: #172130; border-color: #1e3a52; color: #8fb8d8; }
-  body.dark .sv-add-summary:hover { background: #1e3a52; border-color: #2a4f70; color: #d0e4f4; }
+  body.dark .add-summary-btn     { background: #172130; border-color: #1e3a52; color: #8fb8d8; }
+  body.dark .add-summary-btn:hover { background: #1e3a52; border-color: #2a4f70; color: #d0e4f4; }
+  body.dark #summary-panel .add-summary-btn { background: #0d1620; }
   body.dark .group-header       { background: #172130; color: #4a6e8a; border-color: #1e3a52; }
   body.dark .preview-tag-pill   { background: #1e3a52; }
   body.dark #search-box         { background: #172130; border-color: #1e3a52; }
@@ -514,9 +515,10 @@
   .sv-entry-none {
     font-size: 13px; color: var(--ink-mute); font-style: italic;
   }
-  /* Shown in place of the preview text when the summary document still holds
-     only the unrun prompt — i.e. this tentative has no summary written yet. */
-  .sv-add-summary {
+  /* Offered in summary view and in the preview-pane summary panel when the
+     summary document still holds only the unrun prompt — i.e. this tentative
+     has no summary written yet. */
+  .add-summary-btn {
     font-family: 'Outfit', sans-serif;
     font-size: 12px; font-weight: 600;
     padding: 7px 14px;
@@ -524,10 +526,10 @@
     border: 1.5px solid var(--border); border-radius: 6px;
     cursor: pointer; transition: all 0.15s;
   }
-  .sv-add-summary:hover {
+  .add-summary-btn:hover {
     background: var(--gold-soft); border-color: var(--gold); color: var(--ink);
   }
-  .sv-add-summary:disabled { opacity: 0.5; cursor: default; }
+  .add-summary-btn:disabled { opacity: 0.5; cursor: default; }
   .sv-doc-banner {
     background: var(--parchment2); border: 1px solid var(--border);
     border-radius: 6px; padding: 10px 16px; margin-bottom: 16px;
@@ -760,6 +762,8 @@
     text-transform: uppercase; letter-spacing: 0.06em;
     color: var(--ink-mute); margin-bottom: 5px;
   }
+  /* The panel's own background is --parchment2, so lift the button off it */
+  #summary-panel .add-summary-btn { margin-top: 8px; background: var(--parchment); }
 
   /* Hover tooltip */
   #sum-tooltip {
@@ -2683,10 +2687,17 @@ function toggleSummaryPanel() {
     if (!filepath) { panel.innerHTML = '<div class="sum-label">Summary</div><em>No file selected.</em>'; return; }
     panel.dataset.loaded = '1';
     panel.innerHTML = '<div class="sum-label">Copilot Summary</div><span style="color:var(--ink-mute)">Loading\u2026</span>';
-    fetchSummaryText(filepath).then(text => {
-      panel.innerHTML = text
-        ? '<div class="sum-label">Copilot Summary</div>' + escHtml(text)
-        : '<div class="sum-label">Copilot Summary</div><em style="color:var(--ink-mute)">No summary available for this document.</em>';
+    fetchSummaryInfo(filepath).then(info => {
+      if (info.placeholder) {
+        // Only the unrun prompt sits in the summary document \u2014 no summary yet.
+        panel.innerHTML = '<div class="sum-label">Copilot Summary</div>' +
+          '<em style="color:var(--ink-mute)">No summary written for this tentative yet.</em><br>';
+        panel.appendChild(makeAddSummaryButton(filepath, info.summary_path));
+      } else {
+        panel.innerHTML = info.text
+          ? '<div class="sum-label">Copilot Summary</div>' + escHtml(info.text)
+          : '<div class="sum-label">Copilot Summary</div><em style="color:var(--ink-mute)">No summary available for this document.</em>';
+      }
     });
   }
 }
@@ -2720,7 +2731,7 @@ async function fetchSummaryText(filepath) {
 
 function makeAddSummaryButton(srcPath, summaryPath) {
   const btn = document.createElement('button');
-  btn.className = 'sv-add-summary';
+  btn.className = 'add-summary-btn';
   btn.textContent = '✍ Add Summary';
   btn.title = 'Open this tentative and its summary document in Word';
   btn.onclick = e => { e.stopPropagation(); addSummary(btn, srcPath, summaryPath); };
