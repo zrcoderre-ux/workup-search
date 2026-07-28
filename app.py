@@ -435,6 +435,41 @@ def make_snippet(text, terms, chars=500):
 
 SUMMARIES_FOLDER = "Summaries"
 
+# A summary document that still holds nothing but the Copilot prompt means no
+# summary has been written for that tentative yet. Its text is not a summary and
+# must never be shown as one — the UI offers an "Add Summary" action instead.
+# Anchors are matched against the folded form below, so smart quotes, non-
+# breaking hyphens and line breaks in the pasted prompt all still catch.
+_SUMMARY_PROMPT_ANCHORS = (
+    "write a one paragraph past tense summary",
+    "your only output should be the one paragraph summary",
+    "do not include any references or footnote citations",
+)
+
+
+def _fold_summary_text(text):
+    """Lowercase and reduce to alphanumerics separated by single spaces."""
+    return " ".join(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+def is_summary_placeholder(text):
+    """True if the summary document is still just the prompt (no summary yet)."""
+    if not text or not text.strip():
+        return False
+    folded = _fold_summary_text(text)
+    return any(a in folded for a in _SUMMARY_PROMPT_ANCHORS)
+
+
+def summary_path_for_doc(src_filepath):
+    """Path of the summary document belonging to a source document.
+
+      source:  ...\\Motions\\Smith v Jones - MSJ.docx
+      summary: ...\\Summaries\\Smith v Jones - MSJ (Summary).docx
+    """
+    base = os.path.splitext(os.path.basename(src_filepath))[0]
+    root = os.path.dirname(os.path.dirname(src_filepath))  # Workups root: up from motion folder
+    return os.path.join(root, SUMMARIES_FOLDER, base + " (Summary).docx")
+
 def get_folders():
     conn = get_db()
     rows = conn.execute(
@@ -448,27 +483,30 @@ def get_folders():
 def get_summary_for_doc(src_filepath):
     """
     Given a source document filepath, look up its Copilot summary in the DB.
-    The summary file lives in the Summaries subfolder with ' (Summary)' appended
-    to the base filename, e.g.:
-      source:  ...\Motions\Smith v Jones - MSJ.docx
-      summary: ...\Summaries\Smith v Jones - MSJ (Summary).docx
-    Returns {"text": <plain text>} or {"text": None} if not found.
+    See summary_path_for_doc() for how the summary path is derived.
+
+    Returns {"text": <plain text>, "placeholder": bool, "summary_path": <path>}.
+    "text" is None when there is no summary — including when the summary
+    document holds only the unrun Copilot prompt, in which case "placeholder"
+    is True and the caller can offer to open the pair in Word for writing.
     """
+    sum_fp = ""
     try:
-        base   = os.path.splitext(os.path.basename(src_filepath))[0]
-        root   = os.path.dirname(os.path.dirname(src_filepath))  # Workups root: up from motion folder
-        sum_fp = os.path.join(root, SUMMARIES_FOLDER, base + " (Summary).docx")
+        sum_fp = summary_path_for_doc(src_filepath)
         conn   = get_db()
         row    = conn.execute(
             "SELECT content FROM documents WHERE filepath = ?", (sum_fp,)
         ).fetchone()
         conn.close()
-        if row and row["content"]:
-            return {"text": row["content"]}
-        return {"text": None}
+        content = row["content"] if row else None
+        if is_summary_placeholder(content):
+            return {"text": None, "placeholder": True, "summary_path": sum_fp}
+        if content:
+            return {"text": content, "placeholder": False, "summary_path": sum_fp}
+        return {"text": None, "placeholder": False, "summary_path": sum_fp}
     except Exception as e:
         _log.debug("get_summary_for_doc error: %s", e)
-        return {"text": None}
+        return {"text": None, "placeholder": False, "summary_path": sum_fp}
 
 
 def get_full_content(doc_id):
@@ -673,7 +711,7 @@ class Handler(BaseHTTPRequestHandler):
             # Constructs the summary path and returns its plain-text content from the DB.
             src_path = qs.get("filepath", [""])[0]
             if not src_path:
-                self.send_json({"text": None})
+                self.send_json({"text": None, "placeholder": False, "summary_path": ""})
             else:
                 self.send_json(get_summary_for_doc(src_path))
 

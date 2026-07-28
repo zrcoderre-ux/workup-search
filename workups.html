@@ -74,6 +74,8 @@
   body.dark .sv-entry.sv-active { background: #0c2d4a; }
   body.dark .sv-entry-name      { color: #d0e4f4; }
   body.dark .sv-entry-text      { color: #8fb8d8; }
+  body.dark .sv-add-summary     { background: #172130; border-color: #1e3a52; color: #8fb8d8; }
+  body.dark .sv-add-summary:hover { background: #1e3a52; border-color: #2a4f70; color: #d0e4f4; }
   body.dark .group-header       { background: #172130; color: #4a6e8a; border-color: #1e3a52; }
   body.dark .preview-tag-pill   { background: #1e3a52; }
   body.dark #search-box         { background: #172130; border-color: #1e3a52; }
@@ -512,6 +514,20 @@
   .sv-entry-none {
     font-size: 13px; color: var(--ink-mute); font-style: italic;
   }
+  /* Shown in place of the preview text when the summary document still holds
+     only the unrun prompt — i.e. this tentative has no summary written yet. */
+  .sv-add-summary {
+    font-family: 'Outfit', sans-serif;
+    font-size: 12px; font-weight: 600;
+    padding: 7px 14px;
+    background: var(--parchment2); color: var(--ink-soft);
+    border: 1.5px solid var(--border); border-radius: 6px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .sv-add-summary:hover {
+    background: var(--gold-soft); border-color: var(--gold); color: var(--ink);
+  }
+  .sv-add-summary:disabled { opacity: 0.5; cursor: default; }
   .sv-doc-banner {
     background: var(--parchment2); border: 1px solid var(--border);
     border-radius: 6px; padding: 10px 16px; margin-bottom: 16px;
@@ -2041,13 +2057,20 @@ async function renderSummaryPane(scrollToId) {
       lazyLoader.unobserve(entry);
 
       const r = final[parseInt(entry.dataset.index)];
-      const sumText = await fetchSummaryText(r.filepath);
+      const info = await fetchSummaryInfo(r.filepath);
       // Replace placeholder with real content
       const ph = entry.querySelector('.sv-placeholder');
-      if (ph) {
-        ph.className = sumText ? 'sv-entry-text' : 'sv-entry-none';
-        ph.style = '';
-        ph.textContent = sumText || 'No summary available.';
+      if (!ph) return;
+      ph.style = '';
+      if (info.placeholder) {
+        // The summary document still holds only the unrun prompt — no summary
+        // has been written for this tentative yet. Offer to open the pair.
+        ph.className = 'sv-entry-none';
+        ph.textContent = '';
+        ph.appendChild(makeAddSummaryButton(r.filepath, info.summary_path));
+      } else {
+        ph.className = info.text ? 'sv-entry-text' : 'sv-entry-none';
+        ph.textContent = info.text || 'No summary available.';
       }
     });
   }, { root: container, rootMargin: '200px', threshold: 0 });
@@ -2675,13 +2698,55 @@ function resetSummaryPanel() {
   if (panel) { panel.classList.remove('visible'); panel.dataset.loaded = ''; panel.innerHTML = ''; }
 }
 
-async function fetchSummaryText(filepath) {
+// Full /summary record: {text, placeholder, summary_path}. `text` is null when
+// no summary exists; `placeholder` marks the case where the summary document
+// exists but still holds only the unrun prompt.
+async function fetchSummaryInfo(filepath) {
   if (filepath in sumTooltipCache) return sumTooltipCache[filepath];
+  let info = { text: null, placeholder: false, summary_path: '' };
   try {
     const data = await fetch(`${API}/summary?filepath=${encodeURIComponent(filepath)}`).then(r => r.json());
-    sumTooltipCache[filepath] = data.text || null;
-    return sumTooltipCache[filepath];
-  } catch { return null; }
+    info = { text: data.text || null,
+             placeholder: !!data.placeholder,
+             summary_path: data.summary_path || '' };
+    sumTooltipCache[filepath] = info;
+  } catch { /* leave the empty record; don't cache a transient failure */ }
+  return info;
+}
+
+async function fetchSummaryText(filepath) {
+  return (await fetchSummaryInfo(filepath)).text;
+}
+
+function makeAddSummaryButton(srcPath, summaryPath) {
+  const btn = document.createElement('button');
+  btn.className = 'sv-add-summary';
+  btn.textContent = '✍ Add Summary';
+  btn.title = 'Open this tentative and its summary document in Word';
+  btn.onclick = e => { e.stopPropagation(); addSummary(btn, srcPath, summaryPath); };
+  return btn;
+}
+
+// Open the tentative and its "(Summary)" document together, so the summary can
+// be written next to the order it summarizes.
+async function addSummary(btn, srcPath, summaryPath) {
+  if (!srcPath) { alert('No file for this result.'); return; }
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = 'Opening…';
+  const errors = [];
+  for (const path of [srcPath, summaryPath]) {
+    if (!path) continue;
+    try {
+      const result = await fetch(`${API}/open?path=${encodeURIComponent(path)}`).then(r => r.json());
+      if (!result.ok) errors.push(result.error || path);
+    } catch {
+      errors.push('Could not connect to server.');
+      break;
+    }
+  }
+  if (errors.length) alert('Could not open:\n' + errors.join('\n'));
+  setTimeout(() => { btn.disabled = false; btn.textContent = label; }, 1500);
 }
 
 async function showSumTooltip(filepath, evt) {
