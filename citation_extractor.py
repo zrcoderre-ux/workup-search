@@ -628,7 +628,15 @@ _NAME_CONNECTORS = {"of", "the", "and", "&", "de", "la", "du", "von", "van", "re
 
 def _short_name(plaintiff):
     p = plaintiff.strip()
-    p = re.sub(rf"^(?:(?:{_NONV_PREFIX})\s+|Ex parte\s+|People v\.\s+)",
+    # Strip non-v. case-name prefixes ("In re", "Estate of", "Conservatorship
+    # of", etc.) plus "Ex parte" and "People v." so the short name is the
+    # distinguishing subject ("Whitley", not "Conservatorship"). The prefix
+    # group REPEATS ("+") because prefixes nest: "In re Marriage of Bonds" is
+    # "In re" + "Marriage of" + "Bonds", and a single strip leaves "Marriage
+    # of Bonds", whose first word makes every Marriage-of case share the short
+    # name "Marriage" — so the second one in a document resolves every supra
+    # to the first (SupraIndex.add uses setdefault).
+    p = re.sub(rf"^(?:(?:{_NONV_PREFIX})\s+|Ex parte\s+|People v\.\s+)+",
                "", p, flags=re.IGNORECASE)
     parts = p.split()
     return parts[0].rstrip(",.;:") if parts else p
