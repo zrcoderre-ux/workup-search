@@ -642,6 +642,12 @@ def _short_name(plaintiff):
     return parts[0].rstrip(",.;:") if parts else p
 
 
+# Closing punctuation that can sit AFTER the mark that ends a sentence. Stripped
+# before the two sentence-boundary tests in _walk_back_for_name; see there for
+# what goes wrong without it.
+_CLOSING_PUNCT = "”’\"')]"
+
+
 def _walk_back_for_name(text, v_pos):
     """Return start index of the plaintiff name before `v.`, or None."""
     pos = v_pos - 1
@@ -670,7 +676,24 @@ def _walk_back_for_name(text, v_pos):
         if not tok:
             break
 
-        if tok[-1] in ":;!?":
+        # A closing quote HIDES the sentence-ending mark from both boundary
+        # tests below. A quotation that ends a sentence reads `English.”`, whose
+        # last character is the quote, not the period -- so `tok.endswith(".")`
+        # was False, the walk-back sailed on through the sentence before the
+        # citation, and the span came back as
+        #     English.” (Penilla v. Westmont Corp. (2016) 3 Cal.App.5th 205, 209
+        # which links the judge's own quoted prose along with the case name.
+        # Strip the closers for the tests only: the token itself is recorded and
+        # measured unchanged, so a possessive like `Farmers'` is unaffected.
+        tok_core = tok.rstrip(_CLOSING_PUNCT)
+        _had_closer = len(tok_core) < len(tok)
+        if not tok_core:
+            # Nothing but closing punctuation -- a quotation ended right here.
+            if tokens:
+                break
+            return None
+
+        if tok_core[-1] in ":;!?":
             break
 
         _tok_clean_low = tok.lstrip("(.,;:\"'").rstrip(",.;:").lower()
@@ -679,10 +702,17 @@ def _walk_back_for_name(text, v_pos):
                 break
             return None
 
-        if tok.endswith(".") and len(tok) > 1 and tok[-2].islower():
-            inner = tok.rstrip(".")
+        if tok_core.endswith(".") and len(tok_core) > 1 and tok_core[-2].islower():
+            # `Co.”` -- the closing quote says the QUOTATION ended here, so this
+            # is a sentence boundary even though "Co." is exactly the
+            # abbreviation the allowance below exists for. That allowance is for
+            # abbreviations INSIDE a party name, and a name token is never
+            # followed by a closing quote.
+            if _had_closer:
+                break
+            inner = tok_core.rstrip(".")
             is_short_cap_abbrev = inner and inner[0].isupper() and 1 <= len(inner) <= 6
-            if not is_short_cap_abbrev and tok.lower() not in {
+            if not is_short_cap_abbrev and tok_core.lower() not in {
                 "co.", "inc.", "corp.", "ltd.", "ass'n.",
             }:
                 break
