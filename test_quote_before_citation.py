@@ -67,6 +67,28 @@ check(
     PENILLA,
 )
 
+print("\n--- a short-form cite in parentheses is not part of the next name ---")
+# "(Ibid.)" ends in ")", not ".", so the sentence-boundary test missed it the
+# same way a closing quote did, and the walk-back from Nguyen's "v." pulled the
+# whole short cite in -- the Word macro hyperlinked "Ibid.)" along with the
+# case. Reported separately from the quotation shape; same root cause, which is
+# why ")" and "]" are in _CLOSING_PUNCT alongside the quotes.
+NGUYEN = "Nguyen v. Applied Medical Resources Corp. (2016) 4 Cal.App.5th 232"
+check(
+    "(Ibid.) before the case name",
+    span(
+        "a prearbitration exhaustion requirement was reasonable in an agreement "
+        "carrying a mutual obligation to arbitrate. (Ibid.) " + NGUYEN +
+        " distinguished the free peek cases on the same grounds."
+    ),
+    NGUYEN,
+)
+check(
+    "(Id. at p. 250.) before the case name",
+    span("the term again went undefined. (Id. at p. 250.) " + NGUYEN + " so held."),
+    NGUYEN,
+)
+
 print("\n--- plain sentence boundaries still stop it (regression) ---")
 check(
     "unquoted period",
