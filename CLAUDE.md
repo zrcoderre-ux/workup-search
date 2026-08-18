@@ -20,5 +20,6 @@ any failure — there is no pytest harness:
 python3 test_nonv_case_names.py
 python3 test_shortcite_port.py
 python3 test_rule_subdivision.py
+python3 test_search_logic.py
 python3 citation_extractor.py    # module self-test corpus
 ```

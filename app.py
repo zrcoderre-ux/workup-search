@@ -219,9 +219,18 @@ def strip_quotes(t):
     return t.strip().strip('"\'\u201c\u201d\u2018\u2019')
 
 
-def fts_phrase(t):
-    """Wrap a term as a single FTS5 phrase, escaping embedded double quotes."""
-    return '"' + t.replace('"', '""') + '"'
+def fts_phrase(t, prefix=False):
+    """Wrap a term as a single FTS5 phrase, escaping embedded double quotes.
+    prefix=True appends the FTS5 prefix operator outside the phrase quotes,
+    so '"neglig" *' matches negligence/negligent/\u2026"""
+    p = '"' + t.replace('"', '""') + '"'
+    return p + " *" if prefix else p
+
+
+def like_pattern(term):
+    """Build a %substring% LIKE pattern, escaping LIKE wildcards in the term
+    (pair with ESCAPE '\\' in the SQL)."""
+    return "%" + re.sub(r"([\\%_])", r"\\\1", term) + "%"
 
 
 # Splits a query into quoted phrases (straight or curly quotes) and bare words.
@@ -231,84 +240,76 @@ _QUERY_PART_RE = re.compile(r'"([^"]*)"|\u201c([^\u201d]*)\u201d|(\S+)')
 def query_to_fts(query):
     """Build an FTS5 MATCH expression honoring the search box contract:
     quoted text is an exact phrase; bare words must all appear (implicit AND).
-    Every part is phrase-quoted so FTS5 operators (AND, OR, NEAR, -, *) in
-    user input are matched literally instead of being interpreted."""
+    A trailing * on a bare word is a prefix search (neglig* matches
+    negligence). Everything else is phrase-quoted so FTS5 operators
+    (AND, OR, NEAR, -) in user input are matched literally instead of being
+    interpreted."""
     parts = []
     for m in _QUERY_PART_RE.finditer(query):
         text = next(g for g in m.groups() if g is not None)
         text = strip_quotes(text)
-        if text:
-            parts.append(fts_phrase(text))
+        base = text.rstrip("*")
+        if base:
+            parts.append(fts_phrase(base, prefix=(base != text)))
     return " ".join(parts) if parts else fts_phrase(strip_quotes(query))
 
 
 def do_search(query, folder=None, include_terms=None, exclude_terms=None,
               tag_filters=None, limit=500):
-    """Search documents. include_terms/exclude_terms are lists of additional FTS terms.
-       tag_filters is a list of tag names; results must have ALL of them (AND logic)."""
+    """Search documents. include_terms/exclude_terms are refine chips applied as
+       case-insensitive substring filters against content + filename (same
+       semantics as do_browse). tag_filters is a list of tag names; results
+       must have ALL of them (AND logic)."""
     conn = get_db()
     ensure_tags_schema(conn)
 
-    fts_parts = [query_to_fts(query)]
-    for t in (include_terms or []):
-        if t.strip():
-            # A refine chip is a single word-or-phrase: match it whole
-            fts_parts.append(fts_phrase(strip_quotes(t)))
-    fts_query = " ".join(fts_parts)
+    fts_query = query_to_fts(query)
 
-    like_fallback = False
+    # Refine chips are substring filters ("results containing…"), matching the
+    # browse path — NOT extra FTS terms, which return zero results for partial
+    # words. They go into the SQL so they filter before LIMIT applies.
+    refine_clauses, refine_params = [], []
+    for t in (include_terms or []):
+        t = strip_quotes(t)
+        if t:
+            refine_clauses.append(
+                "AND (IFNULL(d.content,'') LIKE ? ESCAPE '\\' OR d.filename LIKE ? ESCAPE '\\')")
+            refine_params += [like_pattern(t)] * 2
+    for t in (exclude_terms or []):
+        t = strip_quotes(t)
+        if t:
+            refine_clauses.append(
+                "AND NOT (IFNULL(d.content,'') LIKE ? ESCAPE '\\' OR d.filename LIKE ? ESCAPE '\\')")
+            refine_params += [like_pattern(t)] * 2
+    refine_sql = " ".join(refine_clauses)
+
+    folder_sql, folder_params = "", []
+    if folder and folder != "all":
+        folder_sql    = "AND d.folder = ?"
+        folder_params = [folder]
 
     try:
-        if folder and folder != "all":
-            rows = conn.execute("""
-                SELECT d.id, d.folder, d.filename, d.filepath, d.content, LENGTH(d.content) AS char_count, rank
-                FROM docs_fts f
-                JOIN documents d ON d.id = f.rowid
-                WHERE docs_fts MATCH ? AND d.folder = ? AND d.folder != ?
-                ORDER BY rank LIMIT ?
-            """, (fts_query, folder, SUMMARIES_FOLDER, limit)).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT d.id, d.folder, d.filename, d.filepath, d.content, LENGTH(d.content) AS char_count, rank
-                FROM docs_fts f
-                JOIN documents d ON d.id = f.rowid
-                WHERE docs_fts MATCH ? AND d.folder != ?
-                ORDER BY rank LIMIT ?
-            """, (fts_query, SUMMARIES_FOLDER, limit)).fetchall()
+        rows = conn.execute(f"""
+            SELECT d.id, d.folder, d.filename, d.filepath, d.content, LENGTH(d.content) AS char_count, rank
+            FROM docs_fts f
+            JOIN documents d ON d.id = f.rowid
+            WHERE docs_fts MATCH ? AND d.folder != ? {folder_sql} {refine_sql}
+            ORDER BY rank LIMIT ?
+        """, [fts_query, SUMMARIES_FOLDER] + folder_params + refine_params + [limit]).fetchall()
     except sqlite3.OperationalError:
-        like_fallback = True
-        like = f"%{query}%"
-        if folder and folder != "all":
-            rows = conn.execute("""
-                SELECT id, folder, filename, filepath, content, LENGTH(content) AS char_count, 0 as rank
-                FROM documents
-                WHERE (content LIKE ? OR filename LIKE ?) AND folder = ? AND folder != ?
-                LIMIT ?
-            """, (like, like, folder, SUMMARIES_FOLDER, limit)).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT id, folder, filename, filepath, content, LENGTH(content) AS char_count, 0 as rank
-                FROM documents
-                WHERE (content LIKE ? OR filename LIKE ?) AND folder != ?
-                LIMIT ?
-            """, (like, like, SUMMARIES_FOLDER, limit)).fetchall()
+        like = like_pattern(query)
+        rows = conn.execute(f"""
+            SELECT d.id, d.folder, d.filename, d.filepath, d.content, LENGTH(d.content) AS char_count, 0 as rank
+            FROM documents d
+            WHERE (IFNULL(d.content,'') LIKE ? ESCAPE '\\' OR d.filename LIKE ? ESCAPE '\\')
+                  AND d.folder != ? {folder_sql} {refine_sql}
+            LIMIT ?
+        """, [like, like, SUMMARIES_FOLDER] + folder_params + refine_params + [limit]).fetchall()
 
     results = []
-    terms = [w for w in (strip_quotes(t).lower() for t in query.split()) if w]
+    terms = [w for w in (strip_quotes(t).rstrip("*").lower() for t in query.split()) if w]
     for r in rows:
         try:
-            doc_content  = (r["content"] or "").lower()
-            doc_filename = r["filename"].lower()
-            haystack     = doc_content + " " + doc_filename
-
-            if any(strip_quotes(t).lower() in haystack for t in (exclude_terms or []) if t.strip()):
-                continue
-
-            # The LIKE fallback query can't express include terms — apply them here
-            if like_fallback and not all(strip_quotes(t).lower() in haystack
-                                         for t in (include_terms or []) if t.strip()):
-                continue
-
             snippet = make_snippet(r["content"] or "", terms)
             results.append({
                 "id":         r["id"],
