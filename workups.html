@@ -1127,7 +1127,7 @@
   <div id="search-bar">
     <div id="search-wrap">
       <span class="icon">🔍</span>
-      <input id="q" type="text" placeholder='Search case names, parties, legal standards… use "quotes" for exact phrase' autocomplete="off" spellcheck="false">
+      <input id="q" type="text" placeholder='Search case names, parties, legal standards… "quotes" for exact phrase, word* for prefix' autocomplete="off" spellcheck="false">
       <button id="clear-btn" onclick="clearSearch()" title="Clear">✕</button>
     </div>
     <div id="search-meta"></div>
@@ -1605,8 +1605,14 @@ function reloadWithFilters() {
 }
 
 // ── LOAD ALL DOCS ─────────────────────────────────────────────────────────────
+// Monotonic id shared by loadAll/doSearch: responses arriving after a newer
+// request has been issued are dropped, so a slow earlier response can't
+// overwrite the results of the query the user actually typed.
+let fetchSeq = 0;
+
 async function loadAll() {
   currentQuery = '';
+  const seq = ++fetchSeq;
   const list = document.getElementById('results-list');
   list.innerHTML = '<div style="padding:20px;text-align:center"><div class="loading-ring"></div></div>';
   document.getElementById('sort-bar').classList.add('visible');
@@ -1617,15 +1623,19 @@ async function loadAll() {
     excludeTerms.forEach(t => url += `&exc=${encodeURIComponent(t)}`);
     activeTagFilters.forEach(t => url += `&tag=${encodeURIComponent(t)}`);
     const resp = await fetch(url);
+    if (seq !== fetchSeq) return;   // stale response — a newer request superseded this one
     if (!resp.ok) {
       const body = await resp.text();
       console.error('Browse failed:', resp.status, body);
       list.innerHTML = `<div class="error-notice">Server error ${resp.status}.<br>Check console (F12) for details.</div>`;
       return;
     }
-    allResults = await resp.json();
+    const data = await resp.json();
+    if (seq !== fetchSeq) return;
+    allResults = data;
     renderResults();
   } catch (err) {
+    if (seq !== fetchSeq) return;
     console.error('Browse request failed:', err);
     list.innerHTML = `<div class="error-notice">Browse failed: ${err.message}<br>Check console (F12) for details.</div>`;
   }
@@ -1654,6 +1664,7 @@ function clearSearch() {
 
 async function doSearch(query) {
   currentQuery = query;
+  const seq = ++fetchSeq;
   const list = document.getElementById('results-list');
   list.innerHTML = '<div style="padding:20px;text-align:center"><div class="loading-ring"></div></div>';
   document.getElementById('search-meta').textContent = '';
@@ -1665,15 +1676,19 @@ async function doSearch(query) {
     excludeTerms.forEach(t => url += `&exc=${encodeURIComponent(t)}`);
     activeTagFilters.forEach(t => url += `&tag=${encodeURIComponent(t)}`);
     const resp = await fetch(url);
+    if (seq !== fetchSeq) return;   // stale response — a newer request superseded this one
     if (!resp.ok) {
       const body = await resp.text();
       console.error('Search failed:', resp.status, body);
       list.innerHTML = `<div class="error-notice">Server error ${resp.status} for query "${query}".<br>Check the terminal/console for details.</div>`;
       return;
     }
-    allResults = await resp.json();
+    const data = await resp.json();
+    if (seq !== fetchSeq) return;
+    allResults = data;
     renderResults();
   } catch (err) {
+    if (seq !== fetchSeq) return;
     console.error('Search request failed:', err);
     list.innerHTML = `<div class="error-notice">Search failed: ${err.message}<br>Check console (F12) for details.</div>`;
   }

@@ -68,6 +68,18 @@ yet anyway — `config.py` is created on the first local run after cloning.
 - **The Workups `.docx` corpus** stays on its SharePoint library path; the
   code only needs the path to it (set in `config.py`).
 
+## Search behavior
+
+- Bare words must all appear in a document (implicit AND); `"quoted text"`
+  (straight or curly quotes) matches as an exact phrase; a trailing `*` on a
+  word is a prefix search (`neglig*` finds negligence/negligent).
+- Narrow-results chips (include/exclude) are plain substring filters against
+  the full document text and filename — a partial word works there.
+- Indexing captures body text plus footnotes/endnotes, and treats tabs and
+  manual line breaks as word separators. After pulling an update that changes
+  extraction, re-run `python index.py` — it detects the change and re-extracts
+  every document once.
+
 ## Citations
 
 Citations are detected at preview time and linked to **live** Westlaw/Lexis

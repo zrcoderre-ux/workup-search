@@ -24,6 +24,36 @@ except ImportError:
 
 WORD_NS = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
+# Bump whenever the extraction logic below changes: forces a one-time
+# re-extraction of every document on the next index run, so fixes actually
+# reach databases whose files are unchanged on disk (the size+hash skip
+# would otherwise keep the stale text forever).
+EXTRACTOR_VERSION = "2"
+
+
+def run_text(run):
+    """Text of one w:r run, with non-text children rendered as separators.
+    Without this, words on either side of a tab or manual line break are
+    concatenated into one token ('MOTION\\tFOR' -> 'MOTIONFOR') and become
+    unsearchable."""
+    parts = []
+    for node in run.iter():
+        tag = node.tag
+        if tag == f"{WORD_NS}t":
+            if node.text:
+                parts.append(node.text)
+        elif tag == f"{WORD_NS}tab":       # literal tab (stop definitions live under w:pPr/w:tabs, not w:r)
+            parts.append("\t")
+        elif tag in (f"{WORD_NS}br", f"{WORD_NS}cr"):
+            parts.append("\n")
+        elif tag == f"{WORD_NS}noBreakHyphen":
+            parts.append("-")
+    return "".join(parts)
+
+
+def para_text(para):
+    return "".join(run_text(r) for r in para.iter(f"{WORD_NS}r"))
+
 
 def long_path(p):
     prefix = "\\\\?\\"
@@ -55,20 +85,24 @@ def is_locally_available(path):
 
 
 def extract_text_from_docx(path):
-    """Extract plain text for FTS indexing (no formatting)."""
+    """Extract plain text for FTS indexing (no formatting).
+    Includes footnote/endnote text (appended after the body) so terms that
+    appear only in notes are still searchable."""
     try:
         with zipfile.ZipFile(path, "r") as z:
-            if "word/document.xml" not in z.namelist():
+            names = z.namelist()
+            if "word/document.xml" not in names:
                 return ""
-            with z.open("word/document.xml") as f:
-                tree = ET.parse(f)
-        root = tree.getroot()
-        paragraphs = []
-        for para in root.iter(f"{WORD_NS}p"):
-            runs = [node.text for node in para.iter(f"{WORD_NS}t") if node.text]
-            text = "".join(runs).strip()
-            if text:
-                paragraphs.append(text)
+            paragraphs = []
+            for member in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml"):
+                if member not in names:
+                    continue
+                with z.open(member) as f:
+                    root = ET.parse(f).getroot()
+                for para in root.iter(f"{WORD_NS}p"):
+                    text = para_text(para).strip()
+                    if text:
+                        paragraphs.append(text)
         return "\n".join(paragraphs)
     except Exception as e:
         return f"[Error reading file: {e}]"
@@ -112,9 +146,7 @@ def extract_html_from_docx(path):
                     is_italic = i is not None and i.get(f"{WORD_NS}val", "1") not in ("0", "false")
                     is_under  = u is not None and u.get(f"{WORD_NS}val", "none") not in ("0", "false", "none")
 
-                text = "".join(
-                    node.text for node in run.iter(f"{WORD_NS}t") if node.text
-                ).replace("\xa0", " ")
+                text = run_text(run).replace("\xa0", " ")
                 if not text:
                     continue
 
@@ -205,6 +237,17 @@ def build_index():
         except Exception:
             pass
 
+    # Extraction-version gate: if the stored version doesn't match, disable
+    # the unchanged-file skip for this run so every document is re-extracted
+    # with the current logic.
+    conn.execute("CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+    ver_row = conn.execute(
+        "SELECT value FROM index_meta WHERE key='extractor_version'").fetchone()
+    force_reextract = ver_row is None or ver_row["value"] != EXTRACTOR_VERSION
+    if force_reextract:
+        print("  (Extraction logic changed — re-extracting all documents this run)")
+
     now = datetime.now().isoformat(timespec="seconds")
     added = updated = skipped = errors = 0
 
@@ -247,7 +290,7 @@ def build_index():
 
             # Skip only if html is present AND size+hash match (timestamps are unreliable
             # with SharePoint/OneDrive sync, which can alter mtime independently of edits)
-            if row and row[2]:  # html present
+            if row and row[2] and not force_reextract:  # html present
                 if row[3] == src_size:  # same size — check hash
                     try:
                         with open(filepath_lp, "rb") as f:
@@ -314,6 +357,8 @@ def build_index():
     # any corruption left in databases indexed before the delete-before-update
     # fix above, where stale tokens caused wrong/missing search hits.
     conn.execute("INSERT INTO docs_fts(docs_fts) VALUES('rebuild')")
+    conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES ('extractor_version', ?)",
+                 (EXTRACTOR_VERSION,))
     conn.commit()
     conn.close()
 
