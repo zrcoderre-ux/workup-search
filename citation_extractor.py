@@ -21,6 +21,8 @@ REPOSITORY KEY FORMATS  (UNCHANGED — repo / harvester / cross-opener compat)
   New statute / rule shapes:
     Federal:    "9 U.S.C. § 1"
     RPC:        "Cal. Rules of Prof. Conduct, rule 1.9"
+    Regulation: "Cal. Code Regs., tit. 27, § 25805"  (typed "statute";
+                law_code "CCR")
 
 WHAT CHANGED IN THIS REVISION (ported from pdf_linker.py)
 ---------------------------------------------------------
@@ -296,6 +298,48 @@ ADDL_SEC_RE = re.compile(
 )
 
 
+# ── CALIFORNIA CODE OF REGULATIONS ──────────────────────────────────────────────
+# The CCR is cited two ways and both turn up in briefs:
+#   title-first (California Style Manual): "Cal. Code Regs., tit. 27, § 25805"
+#   volume-first (Bluebook / native):      "27 Cal. Code Regs. § 25805",
+#                                          "27 CCR § 25805", "27 C.C.R. 25805"
+# "Cal. Admin. Code" is the CCR's pre-1988 name and still appears in older
+# authority, so it is accepted as a spelling of the same code.
+#
+# CCR section numbers run longer and dottier than the codes' and can carry a
+# letter on any component ("§ 66261.24", "§ 1605A.1", "§ 1613A.1.1"), so they
+# get their own pattern instead of reusing the statute one. Subdivisions are
+# matched here and stripped by _bare_section, the same way "437c, subd. (c)"
+# is.
+_CCR_SEC = r"\d+[A-Za-z]?(?:\.\d+[A-Za-z]?)*(?:\([a-zA-Z0-9]+\))*"
+_CCR_NAME = r"(?:Code\s+(?:of\s+)?Regs?(?:ulations)?\.?|Admin(?:istrative)?\.?\s*Code)"
+_CCR_CAL = r"Cal(?:ifornia)?\.?\s*"
+_SEC_MARK = r"(?:§§?|sections?|secs?\.?)"
+
+CCR_TITLE_FIRST_RE = re.compile(
+    rf"\b{_CCR_CAL}{_CCR_NAME}"
+    rf",?\s*tit(?:le|\.)?\s*(?P<title>\d{{1,2}})\s*,?\s*"
+    rf"{_SEC_MARK}\s*(?P<sec>{_CCR_SEC})",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# The section marker is optional here only because "27 CCR 25805" is a form
+# people actually write; the title number and the code name in front of it do
+# the work of keeping false positives out.
+CCR_VOLUME_FIRST_RE = re.compile(
+    rf"\b(?P<title>\d{{1,2}})\s+"
+    rf"(?:C\.\s*C\.\s*R\.?|CCR|{_CCR_CAL}{_CCR_NAME})"
+    rf",?\s*{_SEC_MARK}?\s*(?P<sec>{_CCR_SEC})",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Chained sections within the same title: "tit. 8, §§ 3203, 3204 and 3205".
+CCR_ADDL_SEC_RE = re.compile(
+    rf"\s*(?:,\s*and|,|\s+and)\s+(?P<sec>{_CCR_SEC})",
+    re.IGNORECASE,
+)
+
+
 # ── RULES OF COURT + PROFESSIONAL CONDUCT ───────────────────────────────────────
 _RULE_TITLES = {
     1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
@@ -372,6 +416,30 @@ def build_courts_url(rule_number):
     )
 
 
+# Westlaw Government Publisher hosts the official CCR for free on OAL's
+# behalf; this is the site the user reaches at shared-govt.westlaw.com.
+CCR_PUBLIC_BASE = "https://govt.westlaw.com/calregs"
+
+
+def build_ccr_public_url(title, section):
+    """Free public CCR URL (Westlaw Government Publisher, the official online
+    CCR that OAL contracts for).
+
+    A section-level DOCUMENT url on that site is keyed by an opaque Westlaw
+    GUID (.../Document/IBBE04DA4512211EC828B000D3A7C4BC3) that cannot be
+    derived from a citation, so there is no such thing as a computed deep link
+    to a CCR section there. This returns the site's own search for the cite
+    instead, which is the closest stable substitute. If the query form ever
+    stops answering, CCR_PUBLIC_BASE + "/Search/Index" is the site's search
+    page and always lands.
+
+    This is only the fallback_url; the live provider links the Word macro and
+    the web app hand out come from search_urls.resolve_url.
+    """
+    query = f"{title} CA ADC s {_bare_section(section)}"
+    return f"{CCR_PUBLIC_BASE}/Search/Results?query={quote_plus(query)}"
+
+
 def build_rpc_fallback_url(rule_number):
     return (
         "https://scholar.google.com/scholar?q="
@@ -403,6 +471,19 @@ def lexis_statute_term(law_code, section):
         return None
     p = LEXIS_SEARCH_PREFIX.get(law_code)
     return f"{p} § {_bare_section(section)}" if p else None
+
+
+def wl_ccr_term(title, section):
+    """Westlaw's native CCR cite, e.g. ('27', '25805') -> '27 CA ADC § 25805'.
+    "CA ADC" is Westlaw's abbreviation for the California Code of Regulations
+    (the Code's former name, California Administrative Code, is what the
+    abbreviation preserves)."""
+    return f"{title} CA ADC \u00a7 {_bare_section(section)}"
+
+
+def lexis_ccr_term(title, section):
+    """Lexis's native CCR cite, e.g. ('27', '25805') -> '27 CCR § 25805'."""
+    return f"{title} CCR \u00a7 {_bare_section(section)}"
 
 
 # ── CITATION RESULT CLASS ──────────────────────────────────────────────────────
@@ -1131,9 +1212,64 @@ def _make_statute(law_code, section, span, match_text, *, is_usc=False, title=No
     )
 
 
+def _make_ccr(title, section, span, match_text):
+    """Construct a California Code of Regulations Citation.
+
+    Typed "statute" rather than given a type of its own: every consumer
+    (workups.html, word_cite_bridge, the repo) branches on case/statute/rule,
+    and a regulation behaves like a statute everywhere except the provider
+    search, which keys off law_code == "CCR" instead — see
+    search_urls.resolve_url. The title lives in the key and display, since a
+    section number alone ("§ 100") means nothing without it and Citation has
+    no title slot.
+    """
+    bare = _bare_section(section)
+    key = f"Cal. Code Regs., tit. {title}, \u00a7 {bare}"
+    fallback = build_ccr_public_url(title, bare)
+    return Citation(
+        type="statute", key=key, display=key,
+        url=fallback, fallback_url=fallback, source="auto",
+        match_start=span[0], match_end=span[1], match_text=match_text,
+        code_name="California Code of Regulations", law_code="CCR",
+        section=bare,
+        lexis_search_term=lexis_ccr_term(title, bare),
+        westlaw_search_cite=wl_ccr_term(title, bare),
+        short_names=[],
+    )
+
+
+def _extract_ccr(plain):
+    """Extract California Code of Regulations citations, both cite orders,
+    plus sections chained onto either ("tit. 8, §§ 3203, 3204")."""
+    results = []
+    for rx in (CCR_TITLE_FIRST_RE, CCR_VOLUME_FIRST_RE):
+        for m in rx.finditer(plain):
+            title = m.group("title")
+            results.append(_make_ccr(title, m.group("sec"), m.span(), m.group(0)))
+
+            scan_pos = m.end()
+            while True:
+                cont = CCR_ADDL_SEC_RE.match(plain, scan_pos)
+                if not cont:
+                    break
+                results.append(_make_ccr(
+                    title, cont.group("sec"), cont.span(),
+                    plain[cont.start():cont.end()].lstrip(),
+                ))
+                scan_pos = cont.end()
+    return results
+
+
 def _extract_statutes(plain):
     """Extract statute citations (CA codes + chained sections + federal USC)."""
     results = []
+
+    # Regulations ride along here rather than in their own extractor pass:
+    # the bridge and extract_citations each make one statute call, and routing
+    # CCR cites through it is what makes them reachable without touching either
+    # caller. No LAW_CODES pattern matches "Code Regs.", so the two shapes
+    # never contend for the same span.
+    results.extend(_extract_ccr(plain))
 
     for m in STATUTE_RE.finditer(plain):
         law_code = _statute_law_code(m)
@@ -1447,6 +1583,8 @@ if __name__ == "__main__":
     <p>The court considers Code Civ. Proc., &#167; 437c, subd. (c) and Evid. Code, &#167; 352.</p>
     <p>Chained: Civ. Code &#167;&#167; 1542, 1543, and 1544 apply.</p>
     <p>Federal arbitration under 9 U.S.C. &#167; 1 et seq.</p>
+    <p>Emissions are governed by Cal. Code Regs., tit. 27, &#167; 25805.</p>
+    <p>Volume-first: 8 CCR &#167; 3203(a)(1); see also 22 C.C.R. 66261.24.</p>
     <p>Pursuant to Cal. Rules of Court, rule 3.1350, and Cal. Rules of Court, rule 3.1354.</p>
     <p>Counsel violated Cal. Rules of Prof. Conduct, rule 1.9.</p>
     <p>As discussed, Aguilar, supra, is dispositive; see also Clifford v. Quest Software Inc.</p>
