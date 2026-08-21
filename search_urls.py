@@ -82,6 +82,17 @@ def westlaw_rule_url(query):
     )
 
 
+def westlaw_regulation_url(query):
+    """Westlaw regulation search URL. Regulations, like court rules, are not
+    indexed under contentType=STATUTE, so the STATUTE filter would suppress the
+    very document the cite names — jurisdiction is the only filter applied."""
+    return (
+        "https://1.next.westlaw.com/Search/Results.html"
+        "?query=" + _q(query) +
+        "&jurisdiction=CA"
+    )
+
+
 def westlaw_ucc_url(query):
     """Model Uniform Commercial Code search URL (port of westlawUccUrl) — no CA
     jurisdiction filter, since the model UCC is indexed nationally. Included for
@@ -127,6 +138,12 @@ def resolve_url(c, provider="lexis"):
     if c.type == "statute" and str(c.key).startswith("UCC § "):
         section = c.key[len("UCC § "):]
         return westlaw_ucc_url("Unif.Commercial Code § " + section)
+
+    # California Code of Regulations. Typed "statute" by the extractor (see
+    # _make_ccr) but indexed by Westlaw as a regulation, so it takes the
+    # regulation builder rather than the statute one.
+    if c.type == "statute" and getattr(c, "law_code", None) == "CCR":
+        return westlaw_regulation_url(cite)
 
     if c.type == "case":
         return westlaw_case_url(cite)

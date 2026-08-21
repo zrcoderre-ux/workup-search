@@ -1431,6 +1431,13 @@ function westlawSearchUrl(c) {
     var rterm = c.westlaw_search_cite || c.key;
     return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(rterm) + '&jurisdiction=CA';
   }
+  if (c.law_code === 'CCR') {
+    // California Code of Regulations — typed "statute" by the extractor, but
+    // Westlaw indexes it as a regulation, so contentType=STATUTE would filter
+    // out the very section the cite names.
+    var creg = c.westlaw_search_cite || c.key;
+    return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(creg) + '&jurisdiction=CA';
+  }
   var term = c.westlaw_search_cite || buildWLTerm(c.key);
   return 'https://1.next.westlaw.com/Search/Results.html?query=' + encodeURIComponent(term) + '&jurisdiction=CA&contentType=STATUTE';
 }
