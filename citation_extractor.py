@@ -817,6 +817,13 @@ def _walk_back_for_name(text, v_pos):
                 if tokens:
                     break
                 return None
+            # An ordinal or alphanumeric token -- "21st", "9th", "3M",
+            # "1-800-Flowers" -- opens a party name on its own; only a BARE
+            # number needs the corp-marker / "Local 12" evidence below, since
+            # "in 2019 Smith v. Jones" carries one too.
+            if any(ch.isalpha() for ch in clean):
+                tokens.append((tok_start, tok_end, tok))
+                continue
             _has_corp_marker = any(
                 t[2].rstrip(",.;:").lower() in _CORP_SUFFIX_LOWER
                 or t[2].upper() in _CORP_SUFFIX_UPPER
@@ -884,7 +891,10 @@ def _walk_back_for_name(text, v_pos):
 
     start = tokens[0][0]
     end = tokens[0][1]
-    while start < end and not text[start].isalpha():
+    # Past any opening punctuation, to the first letter OR DIGIT: stopping at a
+    # letter cut "21st Century Ins. Co." down to "st Century Ins. Co." and
+    # "24 Hour Fitness, Inc." to " Hour Fitness, Inc.".
+    while start < end and not text[start].isalnum():
         start += 1
     return start
 
@@ -1087,7 +1097,11 @@ def _extract_cases(plain):
 
         kind, mm = min(candidates, key=lambda c: c[1].start())
         defendant_text = rest[: mm.start()].rstrip(", ").strip()
-        if not defendant_text or not defendant_text[0].isupper():
+        # A defendant opens on a capital -- or on a digit: "9th Street Market
+        # Lofts, LLC", "24 Hour Fitness USA, Inc.", "3M Co.". The capital-only
+        # test dropped every such citation whole, links and all.
+        if not defendant_text or not (defendant_text[0].isupper()
+                                      or defendant_text[0].isdigit()):
             continue
         if len(defendant_text) > 200:
             continue

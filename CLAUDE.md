@@ -22,5 +22,6 @@ python3 test_shortcite_port.py
 python3 test_rule_subdivision.py
 python3 test_search_logic.py
 python3 test_ccr_regs.py
+python3 test_numeric_party_names.py
 python3 citation_extractor.py    # module self-test corpus
 ```
